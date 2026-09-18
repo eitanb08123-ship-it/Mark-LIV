@@ -62,6 +62,13 @@ def _read_full_config() -> dict:
 APP_VERSION  = "MARK LIV"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
+# Bumped by hand on every push during this debugging session (not derived
+# from git — a plain ZIP download has no .git to read from). Shown next to
+# APP_VERSION in the header so a restart makes it visible at a glance
+# whether newly-downloaded code actually loaded, instead of grepping files
+# by hand to check.
+APP_BUILD = "b1"
+
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
 _LEFT_W  = 148
@@ -3642,6 +3649,7 @@ class MainWindow(QMainWindow):
             return l
 
         lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
+        lay.addWidget(_badge(APP_BUILD, C.TEXT_MED))
         lay.addSpacing(8)
         self._drawer_btn = QPushButton("⚙")
         self._drawer_btn.setFixedSize(26, 26)
