@@ -65,6 +65,45 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
+def _is_process_running(app_name: str, timeout: float = 3.0, poll: float = 0.3) -> bool:
+    """Best-effort verification that a process matching `app_name` actually
+    started, polling for up to `timeout` seconds.
+
+    Without this, every launcher below returned True the moment its own
+    subprocess/automation call didn't raise an exception - which is true
+    even when the Popen'd shell command silently failed, or the simulated
+    Start-Menu/Spotlight keystrokes typed into the wrong window and never
+    actually opened anything. `psutil` (already imported above) was sitting
+    unused for exactly this check.
+
+    Without psutil installed, there is nothing to verify against, so this
+    returns True (assume success) rather than reporting every launch as a
+    failure - matching the previous behavior when the optional dependency
+    is missing."""
+    if not _PSUTIL:
+        return True
+    needle = app_name.lower()
+    for suffix in (".exe", ".app"):
+        if needle.endswith(suffix):
+            needle = needle[: -len(suffix)]
+    if not needle:
+        return True
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for proc in psutil.process_iter(["name"]):
+            try:
+                pname = (proc.info.get("name") or "").lower()
+            except Exception:
+                continue
+            if pname.endswith(".exe"):
+                pname = pname[:-4]
+            if needle in pname or pname in needle:
+                return True
+        time.sleep(poll)
+    return False
+
+
 def _normalize(raw: str) -> str:
     key = raw.lower().strip()
 
@@ -88,7 +127,8 @@ def _launch_windows(app_name: str) -> bool:
                 stderr=subprocess.DEVNULL,
             )
             time.sleep(1.5)
-            return True
+            if _is_process_running(app_name):
+                return True
         except Exception as e:
             print(f"[open_app] subprocess failed: {e}")
 
@@ -96,7 +136,7 @@ def _launch_windows(app_name: str) -> bool:
         try:
             subprocess.Popen(f"start {app_name}", shell=True)
             time.sleep(1.0)
-            return True
+            return True   # URI-scheme launches (ms-settings:, ...) have no process to verify
         except Exception:
             pass
 
@@ -109,7 +149,8 @@ def _launch_windows(app_name: str) -> bool:
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
-        return True
+        if _is_process_running(app_name):
+            return True
     except Exception as e:
         print(f"[open_app] Start Menu search failed: {e}")
 
@@ -161,7 +202,8 @@ def _launch_macos(app_name: str) -> bool:
         time.sleep(0.8)
         pyautogui.press("enter")
         time.sleep(1.5)
-        return True
+        if _is_process_running(app_name):
+            return True
     except Exception as e:
         print(f"[open_app] Spotlight failed: {e}")
 
@@ -205,11 +247,12 @@ def _launch_linux(app_name: str) -> bool:
             pass
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["xdg-open", app_name],
             capture_output=True, timeout=5
         )
-        return True
+        if result.returncode == 0:
+            return True
     except Exception:
         pass
 
