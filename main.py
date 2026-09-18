@@ -70,13 +70,14 @@ from actions.background_monitor import (
 from actions.call_contact      import call_contact as _call_contact, windows_idle_seconds
 from actions.auto_reply        import auto_reply_cycle
 from actions.instagram_call_answer import run_cycle as _instagram_call_cycle
+from actions.whatsapp_call_answer import run_cycle as _whatsapp_call_cycle
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
     get_call_checkin_enabled, get_call_checkin_interval_minutes, get_call_checkin_platform,
-    get_auto_reply_enabled, get_auto_reply_platform, get_instagram_auto_answer_enabled,
+    get_auto_reply_enabled, get_instagram_auto_answer_enabled, get_whatsapp_call_answer_enabled,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -1985,11 +1986,14 @@ class JarvisLive:
 
     async def _run_auto_reply(self) -> None:
         """EXPERIMENTAL, OFF BY DEFAULT (see actions/auto_reply.py) - polls
-        the configured chat app for unread messages and replies immediately
-        with an AI-generated response, with no human review. That is an
-        explicit, informed choice made after the risk was raised, not an
-        oversight. Same idle-time guard as _run_call_checkin and for the
-        same reason: this drives the real keyboard/mouse."""
+        EVERY configured chat platform (get_auto_reply_platforms() - e.g.
+        WhatsApp AND Instagram at once) for unread messages and replies
+        immediately with an AI-generated response, with no human review.
+        That is an explicit, informed choice made after the risk was
+        raised, not an oversight. Same idle-time guard as
+        _run_call_checkin and for the same reason: the WhatsApp/Telegram
+        path drives the real keyboard/mouse (the Instagram path does not,
+        but the guard is cheap and applies to the whole cycle either way)."""
         while True:
             await asyncio.sleep(20)
 
@@ -2001,7 +2005,7 @@ class JarvisLive:
                 continue
 
             try:
-                results = await asyncio.to_thread(auto_reply_cycle, get_auto_reply_platform().title())
+                results = await asyncio.to_thread(auto_reply_cycle)
                 for r in results:
                     self.ui.write_log(f"[AutoReply] {r}")
             except Exception as e:
@@ -2029,6 +2033,30 @@ class JarvisLive:
                     self.ui.write_log(f"[InstagramCall] {result}")
             except Exception as e:
                 self.ui.write_log(f"[InstagramCall] Error: {e}")
+
+    # ── WhatsApp call auto-answer ────────────────────────────────────────────────
+
+    async def _run_whatsapp_call_answer(self) -> None:
+        """EXPERIMENTAL, OFF BY DEFAULT (see
+        actions/whatsapp_call_answer.py) - polls WhatsApp Desktop's window
+        (via pywinauto, like actions/auto_reply.py's message detection) and
+        auto-accepts anything that looks like an incoming call. Unlike the
+        Instagram equivalent, this DOES drive the real mouse (click_input())
+        so it uses the same idle-time guard as _run_call_checkin/
+        _run_auto_reply."""
+        while True:
+            await asyncio.sleep(5)
+            if not get_whatsapp_call_answer_enabled():
+                continue
+            idle = windows_idle_seconds()
+            if idle is not None and idle < 15:
+                continue
+            try:
+                result = await asyncio.to_thread(_whatsapp_call_cycle)
+                if result:
+                    self.ui.write_log(f"[WhatsAppCall] {result}")
+            except Exception as e:
+                self.ui.write_log(f"[WhatsAppCall] Error: {e}")
 
     # ── Proactive mode ──────────────────────────────────────────────────────────
 
@@ -2232,6 +2260,7 @@ class JarvisLive:
                     tg.create_task(self._run_call_checkin())
                     tg.create_task(self._run_auto_reply())
                     tg.create_task(self._run_instagram_call_answer())
+                    tg.create_task(self._run_whatsapp_call_answer())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:

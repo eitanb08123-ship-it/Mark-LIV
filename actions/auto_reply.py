@@ -28,9 +28,9 @@ actual inbox layout was equally never inspected live - _find_unread_instagram_ch
 "rows mentioning 'unread'" is the same kind of first guess.
 
 Off by default. Turn on with
-memory.config_manager.save_auto_reply_enabled(True). Platform (whatsapp/
-telegram/instagram) via
-memory.config_manager.save_auto_reply_platform(...).
+memory.config_manager.save_auto_reply_enabled(True). Which platform(s) -
+any combination of whatsapp/telegram/instagram, watched simultaneously -
+via memory.config_manager.save_auto_reply_platforms([...]).
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import time
 
 from core import gemini
 from actions.send_message import _PYAUTOGUI, _open_app, _paste_text, _search_in_app
-from memory.config_manager import get_auto_reply_enabled, get_auto_reply_platform
+from memory.config_manager import get_auto_reply_enabled, get_auto_reply_platforms
 
 try:
     import pyautogui
@@ -218,24 +218,13 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     return f"Replied to {contact} via {app_name}: {reply_text[:80]}"
 
 
-def auto_reply_cycle(app_name: str | None = None) -> list[str]:
-    """One pass: find unread chats, generate and send a reply to each.
-    Returns one result string per chat found (empty list if none, or if the
-    feature/prereqs aren't available) - main.py's background loop logs
-    each one. Never raises."""
-    if not get_auto_reply_enabled():
-        return []
-
-    platform = (app_name or get_auto_reply_platform()).lower()
-    if platform == "instagram":
-        return _auto_reply_cycle_instagram()
-
+def _auto_reply_cycle_desktop_app(platform: str) -> list[str]:
     if not _PYAUTOGUI or pyautogui is None:
         return ["auto_reply: PyAutoGUI is not installed."]
     if not _PYWINAUTO:
         return ["auto_reply: pywinauto is not installed (Windows-only feature right now)."]
 
-    app_name = app_name or platform.title()
+    app_name = platform.title()
     unread = _find_unread_chats(app_name)
     results = []
     for row_text in unread:
@@ -243,6 +232,36 @@ def auto_reply_cycle(app_name: str | None = None) -> list[str]:
             results.append(_reply_to_chat(app_name, row_text))
         except Exception as e:
             results.append(f"Could not reply to a chat: {e}")
+    return results
+
+
+def auto_reply_cycle(platforms: list[str] | str | None = None) -> list[str]:
+    """One pass across every enabled platform (by default, all of
+    memory.config_manager.get_auto_reply_platforms() - e.g. WhatsApp AND
+    Instagram at once, not one at a time): find unread chats, generate and
+    send a reply to each. Returns one result string per chat found across
+    all platforms (empty list if none, or if the feature is disabled) -
+    main.py's background loop logs each one. Never raises.
+
+    `platforms` accepts a single platform name (kept for direct/manual
+    calls and existing tests) or a list; None uses the configured set."""
+    if not get_auto_reply_enabled():
+        return []
+
+    if platforms is None:
+        platform_list = get_auto_reply_platforms()
+    elif isinstance(platforms, str):
+        platform_list = [platforms]
+    else:
+        platform_list = list(platforms)
+
+    results = []
+    for platform in platform_list:
+        platform = platform.lower()
+        if platform == "instagram":
+            results.extend(_auto_reply_cycle_instagram())
+        else:
+            results.extend(_auto_reply_cycle_desktop_app(platform))
     return results
 
 

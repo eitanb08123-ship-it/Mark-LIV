@@ -485,19 +485,25 @@ def save_auto_reply_enabled(enabled: bool) -> None:
 _AUTO_REPLY_PLATFORMS = ("whatsapp", "telegram", "instagram")
 
 
-def get_auto_reply_platform() -> str:
-    """Defaults to instagram, matching call_checkin_platform's default -
-    this is a real fix, not an arbitrary choice: auto-reply used to default
-    to whatsapp even for a setup built entirely around a dedicated
-    Instagram account, so enabling it without also explicitly setting the
-    platform silently watched the wrong app."""
-    v = str(load_api_keys().get("auto_reply_platform", "instagram")).strip().lower()
-    return v if v in _AUTO_REPLY_PLATFORMS else "instagram"
+def get_auto_reply_platforms() -> list[str]:
+    """Which platforms auto-reply watches, ALL AT ONCE (not one at a time) -
+    e.g. ["whatsapp", "instagram"] replies on both. Defaults to
+    ["instagram"], matching call_checkin_platform's own default. An
+    unrecognized or empty stored value falls back to the default rather
+    than watching nothing."""
+    raw = load_api_keys().get("auto_reply_platforms")
+    if isinstance(raw, list):
+        cleaned = [str(p).strip().lower() for p in raw]
+        cleaned = [p for p in cleaned if p in _AUTO_REPLY_PLATFORMS]
+        if cleaned:
+            return cleaned
+    return ["instagram"]
 
 
-def save_auto_reply_platform(platform: str) -> None:
-    p = str(platform or "").strip().lower()
-    _save_flag("auto_reply_platform", p if p in _AUTO_REPLY_PLATFORMS else "instagram")
+def save_auto_reply_platforms(platforms: list[str]) -> None:
+    cleaned = [str(p).strip().lower() for p in (platforms or [])]
+    cleaned = [p for p in cleaned if p in _AUTO_REPLY_PLATFORMS]
+    _patch_config(auto_reply_platforms=cleaned or ["instagram"])
 
 
 def get_instagram_auto_answer_enabled() -> bool:
@@ -509,6 +515,16 @@ def get_instagram_auto_answer_enabled() -> bool:
 
 def save_instagram_auto_answer_enabled(enabled: bool) -> None:
     _save_flag("instagram_auto_answer_enabled", enabled)
+
+
+def get_whatsapp_call_answer_enabled() -> bool:
+    """Whether JARVIS auto-accepts an incoming WhatsApp Desktop call. Off by
+    default - see actions/whatsapp_call_answer.py."""
+    return bool(load_api_keys().get("whatsapp_call_answer_enabled", False))
+
+
+def save_whatsapp_call_answer_enabled(enabled: bool) -> None:
+    _save_flag("whatsapp_call_answer_enabled", enabled)
 
 
 def get_coding_agent_max_steps() -> int:

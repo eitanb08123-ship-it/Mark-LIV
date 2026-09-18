@@ -250,18 +250,34 @@ class _FakeBrowserSession:
         return f"Pressed: {key}"
 
 
-def test_auto_reply_defaults_to_the_configured_platform_not_whatsapp(monkeypatch):
-    """The exact bug: calling with no explicit app_name must honor
-    get_auto_reply_platform() (instagram, by default now) instead of
+def test_auto_reply_defaults_to_the_configured_platforms_not_whatsapp(monkeypatch):
+    """The exact bug: calling with no explicit platforms must honor
+    get_auto_reply_platforms() (["instagram"], by default now) instead of
     silently falling back to WhatsApp."""
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
-    monkeypatch.setattr(auto_reply, "get_auto_reply_platform", lambda: "instagram")
+    monkeypatch.setattr(auto_reply, "get_auto_reply_platforms", lambda: ["instagram"])
     called = {"instagram": False}
     monkeypatch.setattr(auto_reply, "_auto_reply_cycle_instagram", lambda: called.__setitem__("instagram", True) or [])
 
     auto_reply.auto_reply_cycle()
 
     assert called["instagram"] is True
+
+
+def test_auto_reply_watches_multiple_platforms_at_once(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_platforms", lambda: ["whatsapp", "instagram"])
+    called = []
+    monkeypatch.setattr(auto_reply, "_auto_reply_cycle_desktop_app",
+                        lambda platform: called.append(("desktop", platform)) or [f"desktop:{platform}"])
+    monkeypatch.setattr(auto_reply, "_auto_reply_cycle_instagram",
+                        lambda: called.append(("instagram",)) or ["instagram:done"])
+
+    result = auto_reply.auto_reply_cycle()
+
+    assert ("desktop", "whatsapp") in called
+    assert ("instagram",) in called
+    assert result == ["desktop:whatsapp", "instagram:done"]
 
 
 def test_instagram_platform_reports_when_browser_control_unavailable(monkeypatch):
