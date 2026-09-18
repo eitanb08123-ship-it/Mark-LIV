@@ -9,6 +9,7 @@ nothing technically failed.
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,8 +28,14 @@ class TestResult:
 def run_tests(workspace_path: Path, target: str | None = None, timeout: int = 120) -> TestResult:
     """Runs pytest inside `workspace_path`. `target` narrows it to the test
     file written for this specific improvement; omitted, it runs the whole
-    suite (used for a final "did this break anything else" pass)."""
-    args = ["python3", "-m", "pytest", "-q"]
+    suite (used for a final "did this break anything else" pass).
+
+    Uses sys.executable rather than a hardcoded "python"/"python3" - on
+    Windows in particular, a bare "python3" can resolve to an entirely
+    different install than the one this process (and its installed pytest)
+    is actually running on, failing with "No module named pytest" even
+    though pytest is installed and working for everything else."""
+    args = [sys.executable, "-m", "pytest", "-q"]
     if target:
         args.append(target)
 
