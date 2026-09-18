@@ -482,17 +482,22 @@ def save_auto_reply_enabled(enabled: bool) -> None:
     _save_flag("auto_reply_enabled", enabled)
 
 
-_AUTO_REPLY_PLATFORMS = ("whatsapp", "telegram")
+_AUTO_REPLY_PLATFORMS = ("whatsapp", "telegram", "instagram")
 
 
 def get_auto_reply_platform() -> str:
-    v = str(load_api_keys().get("auto_reply_platform", "whatsapp")).strip().lower()
-    return v if v in _AUTO_REPLY_PLATFORMS else "whatsapp"
+    """Defaults to instagram, matching call_checkin_platform's default -
+    this is a real fix, not an arbitrary choice: auto-reply used to default
+    to whatsapp even for a setup built entirely around a dedicated
+    Instagram account, so enabling it without also explicitly setting the
+    platform silently watched the wrong app."""
+    v = str(load_api_keys().get("auto_reply_platform", "instagram")).strip().lower()
+    return v if v in _AUTO_REPLY_PLATFORMS else "instagram"
 
 
 def save_auto_reply_platform(platform: str) -> None:
     p = str(platform or "").strip().lower()
-    _save_flag("auto_reply_platform", p if p in _AUTO_REPLY_PLATFORMS else "whatsapp")
+    _save_flag("auto_reply_platform", p if p in _AUTO_REPLY_PLATFORMS else "instagram")
 
 
 def get_instagram_auto_answer_enabled() -> bool:

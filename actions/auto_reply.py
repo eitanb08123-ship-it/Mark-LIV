@@ -10,20 +10,27 @@ WHY THIS IS EXPERIMENTAL, HONESTLY - read before relying on it: every other
 action in this project that drives the desktop clicks through a small,
 fixed keyboard sequence (open app, search, Enter) - it never needs to know
 what's already on screen. This module is different in kind: it has to read
-WhatsApp/Telegram Desktop's actual UI Automation tree to notice "a new
-message arrived, from whom." That tree was never inspected against a real
-running instance while writing this (no access to the user's machine from
-here) - core/... actions/game_updater.py already uses pywinauto (backend
-"uia") the same way for Steam's installer dialog, which is the precedent
-this follows, but _find_unread_chats()'s "match rows whose accessible text
-contains 'unread'" is a first guess based on WhatsApp Web's own English
-aria-labels (Electron/WhatsApp Desktop exposes the underlying Chromium
-accessibility tree via UIA on Windows), not a verified selector. It will
-likely need correction - especially if the app's display language isn't
-English - using real output from inspect_chat_window() below.
+the chat app's actual structure to notice "a new message arrived, from
+whom." For WhatsApp/Telegram Desktop that means UI Automation (pywinauto,
+backend "uia" - the same pattern actions/game_updater.py already uses for
+Steam's installer dialog), which was never inspected against a real
+running instance while writing this - _find_unread_chats()'s "match rows
+whose accessible text contains 'unread'" is a first guess based on
+WhatsApp Web's own English aria-labels, not a verified selector, and will
+likely need correction (use inspect_chat_window() below). For Instagram
+(browser-based, no desktop app) this instead reuses
+actions/browser_control.py's persistent Playwright session - real DOM
+access via smart_click()/smart_type(), the same approach
+actions/instagram_call_answer.py uses for incoming calls, and for the same
+reason: browsers don't reliably expose a full accessibility tree the way
+Electron desktop apps do, so pywinauto isn't an option here. Instagram's
+actual inbox layout was equally never inspected live - _find_unread_instagram_chats()'s
+"rows mentioning 'unread'" is the same kind of first guess.
 
 Off by default. Turn on with
-memory.config_manager.save_auto_reply_enabled(True).
+memory.config_manager.save_auto_reply_enabled(True). Platform (whatsapp/
+telegram/instagram) via
+memory.config_manager.save_auto_reply_platform(...).
 """
 from __future__ import annotations
 
@@ -47,10 +54,19 @@ except ImportError:
     _PYWINAUTO = False
     Application = None
 
+try:
+    from actions.browser_control import _registry
+    _BROWSER_CONTROL_AVAILABLE = True
+except ImportError:
+    _registry = None
+    _BROWSER_CONTROL_AVAILABLE = False
+
 _WINDOW_TITLE_PATTERNS = {
     "whatsapp": "WhatsApp",
     "telegram": "Telegram",
 }
+
+_INSTAGRAM_INBOX_URL = "https://www.instagram.com/direct/inbox/"
 
 
 def _connect(app_name: str, timeout: float = 5.0):
@@ -102,6 +118,70 @@ def _find_unread_chats(app_name: str) -> list[str]:
         return []
 
 
+def _get_browser_session(browser_name: str = "chrome"):
+    return _registry.get(browser_name)
+
+
+def _find_unread_instagram_chats() -> list[str]:
+    """Best-effort, uncalibrated (see module docstring): navigates the
+    shared Playwright session to Instagram's inbox if it isn't already
+    there, then scans the flat page text for lines mentioning 'unread' and
+    pairs each with the line right before it (the contact name, in a
+    typical inbox row's reading order) - get_text() only returns the whole
+    page's inner_text() with no row boundaries, so this is a heuristic, not
+    a structural match the way _find_unread_chats()'s pywinauto ListItems
+    are. Returns "<contact>\\n<unread line>" per match, matching the row
+    format _reply_via_instagram()'s caller expects. Never raises."""
+    if not _BROWSER_CONTROL_AVAILABLE:
+        return []
+    try:
+        session = _get_browser_session()
+        url = session.run(session.get_url(), timeout=15)
+        if "instagram.com" not in (url or ""):
+            session.run(session.go_to(_INSTAGRAM_INBOX_URL), timeout=30)
+        text = session.run(session.get_text(), timeout=15)
+    except Exception as e:
+        print(f"[AutoReply] Could not read Instagram's inbox: {e}")
+        return []
+
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    results = []
+    for i, line in enumerate(lines):
+        if "unread" in line.lower():
+            contact = lines[i - 1] if i > 0 else ""
+            results.append(f"{contact}\n{line}")
+    return results
+
+
+def _reply_via_instagram(contact_hint: str, reply_text: str) -> str:
+    session = _get_browser_session()
+    session.run(session.smart_click(contact_hint), timeout=10)
+    session.run(session.smart_type("Message", reply_text), timeout=10)
+    session.run(session.press("Enter"), timeout=10)
+    return f"Replied to {contact_hint} via Instagram: {reply_text[:80]}"
+
+
+def _auto_reply_cycle_instagram() -> list[str]:
+    if not _BROWSER_CONTROL_AVAILABLE:
+        return ["auto_reply: browser_control (playwright) is not available."]
+
+    results = []
+    for row_text in _find_unread_instagram_chats():
+        contact = row_text.split("\n")[0].strip()
+        if not contact:
+            results.append("Could not determine who to reply to from an inbox row.")
+            continue
+        reply_text = _generate_reply(row_text)
+        if not reply_text:
+            results.append(f"Gemini produced no reply for {contact} - nothing sent.")
+            continue
+        try:
+            results.append(_reply_via_instagram(contact, reply_text))
+        except Exception as e:
+            results.append(f"Could not reply to {contact} via Instagram: {e}")
+    return results
+
+
 def _generate_reply(incoming_text: str) -> str:
     prompt = (
         "You are replying to an incoming chat message on behalf of the "
@@ -145,12 +225,17 @@ def auto_reply_cycle(app_name: str | None = None) -> list[str]:
     each one. Never raises."""
     if not get_auto_reply_enabled():
         return []
+
+    platform = (app_name or get_auto_reply_platform()).lower()
+    if platform == "instagram":
+        return _auto_reply_cycle_instagram()
+
     if not _PYAUTOGUI or pyautogui is None:
         return ["auto_reply: PyAutoGUI is not installed."]
     if not _PYWINAUTO:
         return ["auto_reply: pywinauto is not installed (Windows-only feature right now)."]
 
-    app_name = app_name or get_auto_reply_platform().title()
+    app_name = app_name or platform.title()
     unread = _find_unread_chats(app_name)
     results = []
     for row_text in unread:

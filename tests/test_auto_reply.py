@@ -206,3 +206,121 @@ def test_inspect_chat_window_reports_connection_failure(monkeypatch):
     result = auto_reply.inspect_chat_window("WhatsApp")
 
     assert "could not connect" in result.lower()
+
+
+# ── Instagram path (browser-based, reuses browser_control's Playwright session) ──
+# Regression coverage for the actual bug reported: auto_reply defaulted to
+# watching WhatsApp even for a setup built entirely around a dedicated
+# Instagram account, so enabling it silently watched the wrong app.
+
+class _FakeBrowserSession:
+    def __init__(self, url="https://www.instagram.com/direct/inbox/", page_text=""):
+        self.url = url
+        self.page_text = page_text
+        self.went_to = []
+        self.clicked = []
+        self.typed = []
+        self.pressed = []
+
+    def run(self, coro, timeout=15):
+        import asyncio
+        return asyncio.run(coro)
+
+    async def get_url(self):
+        return self.url
+
+    async def get_text(self):
+        return self.page_text
+
+    async def go_to(self, url):
+        self.went_to.append(url)
+        self.url = url
+        return f"Opened: {url}"
+
+    async def smart_click(self, description):
+        self.clicked.append(description)
+        return f"Clicked: '{description}'"
+
+    async def smart_type(self, description, text):
+        self.typed.append((description, text))
+        return f"Typed into ({description}): '{text}'"
+
+    async def press(self, key):
+        self.pressed.append(key)
+        return f"Pressed: {key}"
+
+
+def test_auto_reply_defaults_to_the_configured_platform_not_whatsapp(monkeypatch):
+    """The exact bug: calling with no explicit app_name must honor
+    get_auto_reply_platform() (instagram, by default now) instead of
+    silently falling back to WhatsApp."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_platform", lambda: "instagram")
+    called = {"instagram": False}
+    monkeypatch.setattr(auto_reply, "_auto_reply_cycle_instagram", lambda: called.__setitem__("instagram", True) or [])
+
+    auto_reply.auto_reply_cycle()
+
+    assert called["instagram"] is True
+
+
+def test_instagram_platform_reports_when_browser_control_unavailable(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", False)
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    assert any("browser_control" in r.lower() for r in result)
+
+
+def test_find_unread_instagram_chats_pairs_contact_with_the_unread_marker(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(page_text="Dana\n3 unread messages\nMom\nSee you tonight")
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    result = auto_reply._find_unread_instagram_chats()
+
+    # "Mom" has no unread marker and must not be picked up; "Dana" (the line
+    # right before the unread marker) must be preserved as the contact -
+    # this is the exact bug caught while writing this test: matching only
+    # the marker line on its own loses the contact entirely.
+    assert result == ["Dana\n3 unread messages"]
+    assert fake.went_to == []  # already on instagram.com - no navigation needed
+
+
+def test_find_unread_instagram_chats_navigates_when_not_on_instagram(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(url="https://example.com", page_text="")
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    auto_reply._find_unread_instagram_chats()
+
+    assert fake.went_to == [auto_reply._INSTAGRAM_INBOX_URL]
+
+
+def test_reply_via_instagram_clicks_types_and_sends(monkeypatch):
+    fake = _FakeBrowserSession()
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    result = auto_reply._reply_via_instagram("Dana", "Sure, on it!")
+
+    assert fake.clicked == ["Dana"]
+    assert fake.typed == [("Message", "Sure, on it!")]
+    assert fake.pressed == ["Enter"]
+    assert "Dana" in result
+    assert "Sure, on it!" in result
+
+
+def test_auto_reply_cycle_instagram_end_to_end(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    monkeypatch.setattr(auto_reply, "_find_unread_instagram_chats", lambda: ["Dana\nunread"])
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda text: "On my way!")
+    fake = _FakeBrowserSession()
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    assert len(result) == 1
+    assert "Dana" in result[0]
+    assert fake.typed == [("Message", "On my way!")]
