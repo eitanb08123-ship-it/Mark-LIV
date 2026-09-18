@@ -288,6 +288,24 @@ design, commands, and limits: **[SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md)**.
 
 ---
 
+## 🛠️ Coding Agent
+
+Separately from the self-improvement engine above (which only ever touches
+Mark LIV's own source), JARVIS also has a real coding agent for **your**
+projects. Ask it to **"build me a Python game"**, **"create a website"**,
+**"fix the bug in my project"**, **"add a button to the app"**, **"install
+the missing dependency"**, or **"review the code and find problems"** — it
+inspects the project, reads/writes/edits files, runs commands and tests,
+reads back any errors, and retries across multiple steps until the task is
+done, entirely inside a sandboxed workspace folder
+(`~/Desktop/JarvisWorkspace` by default). Deleting a file, running an
+arbitrary shell command, or installing a dependency stops for your
+on-screen confirmation first, unless you turned on auto-approval for that
+category. Full design, tool list, and permission model:
+**[CODING_AGENT.md](CODING_AGENT.md)**.
+
+---
+
 ## ⚡ Quick Start
 
 ```bash
@@ -351,7 +369,8 @@ Mark LIV/
 │   ├── youtube_video.py      # YouTube playback control
 │   ├── game_updater.py       # Game update management (Steam / Epic)
 │   ├── code_helper.py        # Code review and generation
-│   ├── dev_agent.py          # Developer task agent
+│   ├── dev_agent.py          # Builds a brand-new multi-file project from scratch
+│   ├── coding_agent.py       # General coding agent — build/fix/edit/test YOUR projects, see CODING_AGENT.md
 │   ├── desktop.py            # Desktop and taskbar control
 │   ├── self_analyze.py       # Self-improvement: read-only report (no changes)
 │   ├── self_improve.py       # Self-improvement: attempt a fix, isolated + tested
@@ -367,6 +386,11 @@ Mark LIV/
 │   │   ├── problem_detector.py, code_analyzer.py, planner.py, executor.py
 │   │   ├── test_runner.py, evaluator.py, rollback_manager.py, history.py
 │   │   └── safety_guard.py    # Hard denylist — cannot edit itself, credentials, or the audit trail
+│   ├── coding_agent/          # General coding agent — see CODING_AGENT.md
+│   │   ├── agent_loop.py      # Plan → inspect → choose tool → execute → test → fix → finished
+│   │   ├── tools.py           # read/write/edit/list/search/create/delete/run_command/run_tests/get_project_structure
+│   │   ├── permissions.py     # Read/Write/Execute/Delete/Install gating — hard-denies + confirm.py
+│   │   └── workspace.py       # Sandbox root — nothing it touches may resolve outside it
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs

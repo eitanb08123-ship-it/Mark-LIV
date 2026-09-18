@@ -382,6 +382,44 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
+# ── Coding agent (core/coding_agent/) ───────────────────────────────────────
+# The general-purpose coding agent is sandboxed to one workspace folder and
+# gates execute/install/delete through core/confirm.py by default - these
+# settings only relax the execute/install side of that gate. Delete has no
+# auto-flag at all: it always asks (see core/coding_agent/permissions.py).
+
+def get_workspace_root() -> str:
+    """Root folder the coding agent is sandboxed to. '' means the default
+    (~/Desktop/JarvisWorkspace) - see core/coding_agent/workspace.py."""
+    return (load_api_keys().get("workspace_root", "") or "").strip()
+
+
+def save_workspace_root(path: str) -> None:
+    _patch_config(workspace_root=(path or "").strip())
+
+
+def get_coding_agent_auto_execute() -> bool:
+    """Whether the coding agent may run ordinary shell commands (running the
+    project, linting, ...) without an on-screen confirmation each time. A
+    hard-denied set of destructive patterns (sudo, rm -rf /, ...) is refused
+    regardless of this flag - see core/coding_agent/permissions.py."""
+    return bool(load_api_keys().get("coding_agent_auto_execute", False))
+
+
+def save_coding_agent_auto_execute(enabled: bool) -> None:
+    _save_flag("coding_agent_auto_execute", enabled)
+
+
+def get_coding_agent_auto_install() -> bool:
+    """Whether the coding agent may install packages (pip/npm/apt/brew
+    install) without an on-screen confirmation each time."""
+    return bool(load_api_keys().get("coding_agent_auto_install", False))
+
+
+def save_coding_agent_auto_install(enabled: bool) -> None:
+    _save_flag("coding_agent_auto_install", enabled)
+
+
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}
