@@ -161,6 +161,21 @@ def test_find_unread_chats_matches_rows_mentioning_unread(monkeypatch):
     assert result == ["Dana\n3 unread messages", "Work group\n1 unread message"]
 
 
+def test_find_unread_chats_matches_hebrew_unread_markers(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    fake_rows = [
+        SimpleNamespace(window_text=lambda: "דנה\nהודעה אחת שלא נקראה"),
+        SimpleNamespace(window_text=lambda: "אמא\nנתראה הערב"),
+        SimpleNamespace(window_text=lambda: "קבוצת עבודה\n2 הודעות שלא נקראו"),
+    ]
+    fake_win = SimpleNamespace(descendants=lambda control_type: fake_rows)
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name, timeout=5.0: fake_win)
+
+    result = auto_reply._find_unread_chats("WhatsApp")
+
+    assert result == ["דנה\nהודעה אחת שלא נקראה", "קבוצת עבודה\n2 הודעות שלא נקראו"]
+
+
 def test_find_unread_chats_returns_empty_without_pywinauto(monkeypatch):
     monkeypatch.setattr(auto_reply, "_PYWINAUTO", False)
     assert auto_reply._find_unread_chats("WhatsApp") == []
@@ -302,6 +317,16 @@ def test_find_unread_instagram_chats_pairs_contact_with_the_unread_marker(monkey
     # the marker line on its own loses the contact entirely.
     assert result == ["Dana\n3 unread messages"]
     assert fake.went_to == []  # already on instagram.com - no navigation needed
+
+
+def test_find_unread_instagram_chats_matches_hebrew_unread_markers(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(page_text="דנה\n3 הודעות שלא נקראו\nאמא\nנתראה הערב")
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    result = auto_reply._find_unread_instagram_chats()
+
+    assert result == ["דנה\n3 הודעות שלא נקראו"]
 
 
 def test_find_unread_instagram_chats_navigates_when_not_on_instagram(monkeypatch):

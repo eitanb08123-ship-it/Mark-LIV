@@ -27,11 +27,11 @@ pyautogui-based features need one.
 
 HONESTY NOTE: Instagram's incoming-call UI text/labels were never
 inspected live while writing this (no access to the user's account/session
-from here). _CALL_INDICATOR_TEXTS and _ACCEPT_LABELS are English-language
-guesses - if the account's Instagram UI language isn't English, or the
-wording has changed, this will detect nothing. Calibrate with
-actions.browser_control's own get_text/screenshot actions pointed at the
-inbox while a real call is ringing.
+from here). _CALL_INDICATOR_TEXTS and _ACCEPT_LABELS include both English
+and Hebrew guesses (every screenshot shared while building this feature
+showed a Hebrew UI) - if the wording still doesn't match, this will detect
+nothing. Calibrate with actions.browser_control's own get_text/screenshot
+actions pointed at the inbox while a real call is ringing.
 
 Off by default. Turn on with
 memory.config_manager.save_instagram_auto_answer_enabled(True).
@@ -51,8 +51,9 @@ _INBOX_URL = "https://www.instagram.com/direct/inbox/"
 
 _CALL_INDICATOR_TEXTS = (
     "is calling", "incoming call", "calling you", "video call", "voice call",
+    "מתקשר", "מתקשרת", "שיחה נכנסת", "שיחת וידאו", "שיחה קולית",
 )
-_ACCEPT_LABELS = ("Accept", "Answer", "Join call", "Join")
+_ACCEPT_LABELS = ("Accept", "Answer", "Join call", "Join", "קבל", "ענה", "הצטרף")
 
 
 def _get_session(browser_name: str = "chrome"):

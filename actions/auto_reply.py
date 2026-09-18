@@ -100,10 +100,19 @@ def inspect_chat_window(app_name: str = "WhatsApp", max_depth: int = 3) -> str:
     return buf.getvalue()[:6000]
 
 
+# English AND Hebrew markers: every screenshot shared while building this
+# feature showed a Hebrew Windows/app UI, so an English-only match would
+# silently never fire regardless of anything else being right. Still a
+# guess (see module docstring) - just one accounting for the one concrete,
+# well-justified thing known about the real setup.
+_UNREAD_MARKERS = ("unread", "שלא נקראה", "שלא נקראו", "לא נקראה", "לא נקראו")
+
+
 def _find_unread_chats(app_name: str) -> list[str]:
     """Best-effort, uncalibrated (see module docstring): returns the full
-    accessible text of each chat-list row that mentions 'unread'. Empty on
-    any failure - never raises, since this runs unattended on a timer."""
+    accessible text of each chat-list row that mentions an unread marker
+    (English or Hebrew - see _UNREAD_MARKERS). Empty on any failure - never
+    raises, since this runs unattended on a timer."""
     if not _PYWINAUTO:
         return []
     try:
@@ -111,7 +120,8 @@ def _find_unread_chats(app_name: str) -> list[str]:
         rows = win.descendants(control_type="ListItem")
         return [
             text for r in rows
-            if (text := (r.window_text() or "")) and "unread" in text.lower()
+            if (text := (r.window_text() or ""))
+            and any(marker in text.lower() for marker in _UNREAD_MARKERS)
         ]
     except Exception as e:
         print(f"[AutoReply] Could not read {app_name}'s chat list: {e}")
@@ -125,13 +135,14 @@ def _get_browser_session(browser_name: str = "chrome"):
 def _find_unread_instagram_chats() -> list[str]:
     """Best-effort, uncalibrated (see module docstring): navigates the
     shared Playwright session to Instagram's inbox if it isn't already
-    there, then scans the flat page text for lines mentioning 'unread' and
-    pairs each with the line right before it (the contact name, in a
-    typical inbox row's reading order) - get_text() only returns the whole
-    page's inner_text() with no row boundaries, so this is a heuristic, not
-    a structural match the way _find_unread_chats()'s pywinauto ListItems
-    are. Returns "<contact>\\n<unread line>" per match, matching the row
-    format _reply_via_instagram()'s caller expects. Never raises."""
+    there, then scans the flat page text for lines mentioning an unread
+    marker (English or Hebrew - see _UNREAD_MARKERS) and pairs each with the
+    line right before it (the contact name, in a typical inbox row's
+    reading order) - get_text() only returns the whole page's inner_text()
+    with no row boundaries, so this is a heuristic, not a structural match
+    the way _find_unread_chats()'s pywinauto ListItems are. Returns
+    "<contact>\\n<unread line>" per match, matching the row format
+    _reply_via_instagram()'s caller expects. Never raises."""
     if not _BROWSER_CONTROL_AVAILABLE:
         return []
     try:
@@ -147,7 +158,7 @@ def _find_unread_instagram_chats() -> list[str]:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     results = []
     for i, line in enumerate(lines):
-        if "unread" in line.lower():
+        if any(marker in line.lower() for marker in _UNREAD_MARKERS):
             contact = lines[i - 1] if i > 0 else ""
             results.append(f"{contact}\n{line}")
     return results

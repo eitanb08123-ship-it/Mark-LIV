@@ -113,6 +113,18 @@ def test_detects_and_answers_a_ringing_call(monkeypatch, available):
     assert "Accept" in fake.clicked_labels
 
 
+def test_detects_and_answers_a_ringing_call_in_hebrew(monkeypatch, available):
+    fake = _FakeSession(
+        page_text="דנה מתקשרת...\nדחה  קבל",
+        click_result="Clicked (button): 'קבל'",
+    )
+    monkeypatch.setattr(ica, "_get_session", lambda name="chrome": fake)
+
+    result = ica.check_and_answer()
+
+    assert "Answered" in result
+
+
 def test_call_detected_but_no_button_matches_is_reported_honestly(monkeypatch, available):
     fake = _FakeSession(
         page_text="Incoming video call from Dana",

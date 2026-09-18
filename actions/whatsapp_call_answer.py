@@ -14,9 +14,11 @@ unlike Instagram's Playwright-dispatched clicks.
 
 HONESTY NOTE: WhatsApp's incoming-call UI text/labels were never inspected
 live while writing this (no access to the user's machine from here).
-_CALL_INDICATOR_TEXTS and _ACCEPT_LABELS are English-language guesses -
-calibrate with actions.auto_reply.inspect_chat_window("WhatsApp") pointed
-at the window while a real call is ringing.
+_CALL_INDICATOR_TEXTS and _ACCEPT_LABELS include both English and Hebrew
+guesses (every screenshot shared while building this feature showed a
+Hebrew Windows/app UI) - still guesses, not verified selectors. Calibrate
+with actions.auto_reply.inspect_chat_window("WhatsApp") pointed at the
+window while a real call is ringing.
 
 Off by default. Turn on with
 memory.config_manager.save_whatsapp_call_answer_enabled(True).
@@ -26,8 +28,11 @@ from __future__ import annotations
 from actions.auto_reply import _PYWINAUTO, _connect
 from memory.config_manager import get_whatsapp_call_answer_enabled
 
-_CALL_INDICATOR_TEXTS = ("is calling", "incoming call", "video call", "voice call")
-_ACCEPT_LABELS = ("Accept", "Answer")
+_CALL_INDICATOR_TEXTS = (
+    "is calling", "incoming call", "video call", "voice call",
+    "מתקשר", "מתקשרת", "שיחה נכנסת", "שיחת וידאו", "שיחה קולית",
+)
+_ACCEPT_LABELS = ("Accept", "Answer", "קבל", "ענה", "ענה לשיחה")
 
 
 def check_and_answer(app_name: str = "WhatsApp") -> str:

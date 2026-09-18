@@ -81,6 +81,21 @@ def test_detects_and_answers_a_ringing_call(monkeypatch):
     assert accept_btn.clicked is True
 
 
+def test_detects_and_answers_a_ringing_call_in_hebrew(monkeypatch):
+    monkeypatch.setattr(wca, "_PYWINAUTO", True)
+    accept_btn = _FakeButton("קבל")
+    fake_win = _FakeWindow(
+        texts=["דנה מתקשרת...", "דחה", "קבל"],
+        buttons=[_FakeButton("דחה"), accept_btn],
+    )
+    monkeypatch.setattr(wca, "_connect", lambda app_name: fake_win)
+
+    result = wca.check_and_answer()
+
+    assert "Answered" in result
+    assert accept_btn.clicked is True
+
+
 def test_call_detected_but_no_accept_button_is_reported_honestly(monkeypatch):
     monkeypatch.setattr(wca, "_PYWINAUTO", True)
     fake_win = _FakeWindow(texts=["Incoming video call from Dana"], buttons=[])
