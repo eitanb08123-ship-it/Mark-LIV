@@ -67,11 +67,13 @@ from actions.proactive         import ProactiveEngine
 from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
 )
+from actions.call_contact      import call_contact as _call_contact, windows_idle_seconds
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_call_checkin_enabled, get_call_checkin_interval_minutes, get_call_checkin_platform,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -1941,6 +1943,41 @@ class JarvisLive:
                         print(f"[Monitor] ⚠️ Background check error: {e}")
             await asyncio.sleep(1800)     # check every 30 minutes
 
+    # ── Call check-in ────────────────────────────────────────────────────────────
+
+    async def _run_call_checkin(self) -> None:
+        """Optional, OFF BY DEFAULT: places a real voice call to the
+        configured owner contact (actions/call_contact.py) on a fixed
+        interval, day and night, when enabled - turn on with
+        memory.config_manager.save_call_checkin_enabled(True).
+
+        Unlike every other background task here, this one drives the real
+        mouse/keyboard (opening an app/browser, clicking, typing) rather
+        than just sending text into the Live session - so on Windows it
+        skips a cycle if the user touched the keyboard/mouse in the last
+        15 seconds, rather than hijack whatever they're doing. There is no
+        such guard on macOS/Linux yet (windows_idle_seconds() returns None
+        there, so this proceeds unconditionally)."""
+        while True:
+            interval_minutes = get_call_checkin_interval_minutes()
+            await asyncio.sleep(interval_minutes * 60)
+
+            if not get_call_checkin_enabled():
+                continue
+
+            idle = windows_idle_seconds()
+            if idle is not None and idle < 15:
+                self.ui.write_log("SYS: Call check-in skipped - you're actively using the computer.")
+                continue
+
+            try:
+                result = await asyncio.to_thread(
+                    _call_contact, {"platform": get_call_checkin_platform()}, player=self.ui,
+                )
+                self.ui.write_log(f"[CallCheckin] {result}")
+            except Exception as e:
+                self.ui.write_log(f"[CallCheckin] Error: {e}")
+
     # ── Proactive mode ──────────────────────────────────────────────────────────
 
     async def _run_proactive_mode(self) -> None:
@@ -2140,6 +2177,7 @@ class JarvisLive:
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
+                    tg.create_task(self._run_call_checkin())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:

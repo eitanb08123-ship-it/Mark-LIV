@@ -432,6 +432,43 @@ def save_owner_contact_name(name: str) -> None:
     _patch_config(owner_contact_name=(name or "").strip())
 
 
+def get_call_checkin_enabled() -> bool:
+    """Whether JARVIS places a periodic real voice call to the owner
+    contact (actions/call_contact.py) on a timer. Off by default - this
+    drives real mouse/keyboard automation on an interval, unlike every
+    other background check in main.py, which only ever sends text into the
+    Live session."""
+    return bool(load_api_keys().get("call_checkin_enabled", False))
+
+
+def save_call_checkin_enabled(enabled: bool) -> None:
+    _save_flag("call_checkin_enabled", enabled)
+
+
+def get_call_checkin_interval_minutes() -> int:
+    try:
+        return max(5, int(load_api_keys().get("call_checkin_interval_minutes", 60)))
+    except (TypeError, ValueError):
+        return 60
+
+
+def save_call_checkin_interval_minutes(minutes: int) -> None:
+    _patch_config(call_checkin_interval_minutes=max(5, int(minutes)))
+
+
+_CALL_CHECKIN_PLATFORMS = ("whatsapp", "telegram", "instagram")
+
+
+def get_call_checkin_platform() -> str:
+    v = str(load_api_keys().get("call_checkin_platform", "instagram")).strip().lower()
+    return v if v in _CALL_CHECKIN_PLATFORMS else "instagram"
+
+
+def save_call_checkin_platform(platform: str) -> None:
+    p = str(platform or "").strip().lower()
+    _save_flag("call_checkin_platform", p if p in _CALL_CHECKIN_PLATFORMS else "instagram")
+
+
 def get_coding_agent_max_steps() -> int:
     """How many tool-call rounds the coding agent's loop may take before it
     is forced to stop and report what it has so far."""

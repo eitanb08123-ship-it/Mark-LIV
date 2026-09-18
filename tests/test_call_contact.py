@@ -132,3 +132,50 @@ def test_unexpected_exception_is_reported_not_raised(monkeypatch):
     result = call_contact.call_contact({})
 
     assert "could not place the call" in result.lower()
+
+
+# ── Instagram (browser-based, separate code path from the desktop apps) ─────────
+
+def test_instagram_platform_uses_the_browser_not_open_app(monkeypatch):
+    monkeypatch.setattr(call_contact, "get_owner_contact_name", lambda: "eitanbb00")
+    opened_urls = []
+    pasted = []
+    called_open_app = {"yes": False}
+
+    monkeypatch.setattr(call_contact, "_open_app", lambda name: called_open_app.__setitem__("yes", True) or True)
+    monkeypatch.setattr(call_contact, "_open_browser_url", lambda url: opened_urls.append(url) or True)
+    monkeypatch.setattr(call_contact, "_paste_text", lambda text: pasted.append(text))
+    monkeypatch.setattr(call_contact, "pyautogui", SimpleNamespace(
+        press=lambda *a, **kw: None, hotkey=lambda *a, **kw: None,
+    ))
+    monkeypatch.setattr(call_contact, "_PYAUTOGUI", True)
+
+    result = call_contact.call_contact({"platform": "instagram"})
+
+    assert called_open_app["yes"] is False
+    assert opened_urls == ["https://www.instagram.com/direct/new/"]
+    assert pasted == ["eitanbb00"]
+    assert "instagram" in result.lower()
+    assert "attempted" in result.lower()
+    assert "cannot confirm" in result.lower()
+
+
+def test_instagram_browser_open_failure_is_reported(monkeypatch):
+    monkeypatch.setattr(call_contact, "get_owner_contact_name", lambda: "eitanbb00")
+    monkeypatch.setattr(call_contact, "_open_browser_url", lambda url: False)
+    monkeypatch.setattr(call_contact, "pyautogui", SimpleNamespace(
+        press=lambda *a, **kw: None, hotkey=lambda *a, **kw: None,
+    ))
+    monkeypatch.setattr(call_contact, "_PYAUTOGUI", True)
+
+    result = call_contact.call_contact({"platform": "instagram"})
+
+    assert "could not open instagram" in result.lower()
+
+
+# ── windows_idle_seconds() ───────────────────────────────────────────────────────
+
+def test_windows_idle_seconds_returns_none_when_ctypes_windll_is_unavailable():
+    # This test runs on Linux (no ctypes.windll), which is exactly the
+    # "any other OS" case the function documents - it must not raise.
+    assert call_contact.windows_idle_seconds() is None
