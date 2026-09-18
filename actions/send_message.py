@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from actions.open_app import launch_app as _launch_app
+from actions.open_app import wait_for_clipboard as _wait_for_clipboard
 
 try:
     import pyautogui
@@ -55,27 +56,6 @@ def _get_os() -> str:
 def _require_pyautogui():
     if not _PYAUTOGUI:
         raise RuntimeError("PyAutoGUI not installed. Run: pip install pyautogui")
-
-
-def _wait_for_clipboard(text: str, timeout: float = 1.0, poll: float = 0.05) -> bool:
-    """Polls pyperclip.paste() until it matches what was just copied, or
-    `timeout` runs out. Exists because of a real, observed race: this
-    process also runs a PyQt GUI, and Windows' clipboard logged
-    'qt.qpa.mime: Retrying to obtain clipboard' contention right around a
-    paste - a single fixed sleep() after copy() isn't a reliable enough
-    guarantee that Ctrl+V will paste the NEW text and not something stale.
-    Returns False (not True) on timeout so the caller can at least log it -
-    still proceeds either way, since there's nothing better to fall back to
-    once pyautogui.hotkey() actually fires (see the caller)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if pyperclip.paste() == text:
-                return True
-        except Exception:
-            pass
-        time.sleep(poll)
-    return False
 
 
 def _paste_text(text: str) -> None:
@@ -177,8 +157,14 @@ def _search_in_app(query: str, app_name: str = "") -> None:
         os_name = _get_os()
         search_hotkey = ("command", "f") if os_name == "mac" else ("ctrl", "f")
         pyautogui.hotkey(*search_hotkey)
-        time.sleep(0.5)
 
+    # Whichever path focused the search box (a real click or Ctrl+F), give
+    # the app a moment to actually process it before Ctrl+A/Delete fire -
+    # this was previously ONLY here for the Ctrl+F path, so a successful
+    # click straight into Ctrl+A/Delete/paste with zero delay could act
+    # before the click's focus change had taken effect (observed live:
+    # "clicked search and stopped").
+    time.sleep(0.5)
     _clear_and_paste(query)
     time.sleep(1.0)
 

@@ -19,46 +19,6 @@ def _no_real_sleeping(monkeypatch):
     monkeypatch.setattr(send_message.time, "sleep", lambda s: None)
 
 
-def test_wait_for_clipboard_returns_true_as_soon_as_it_matches(monkeypatch):
-    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=lambda: "hello"), raising=False)
-
-    assert send_message._wait_for_clipboard("hello") is True
-
-
-def test_wait_for_clipboard_polls_until_it_matches(monkeypatch):
-    calls = {"n": 0}
-
-    def _paste():
-        calls["n"] += 1
-        return "hello" if calls["n"] >= 3 else "stale"
-
-    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=_paste), raising=False)
-
-    assert send_message._wait_for_clipboard("hello") is True
-    assert calls["n"] == 3
-
-
-def test_wait_for_clipboard_gives_up_after_timeout(monkeypatch):
-    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=lambda: "stale"), raising=False)
-    # time.sleep is a no-op (autouse fixture), so time.time() driving the
-    # deadline is what actually needs to elapse - use a tiny timeout so the
-    # test doesn't really wait a full second.
-    result = send_message._wait_for_clipboard("hello", timeout=0.01, poll=0.001)
-
-    assert result is False
-
-
-def test_wait_for_clipboard_survives_a_paste_error(monkeypatch):
-    def _boom():
-        raise RuntimeError("clipboard busy")
-
-    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=_boom), raising=False)
-
-    result = send_message._wait_for_clipboard("hello", timeout=0.01, poll=0.001)
-
-    assert result is False
-
-
 def test_paste_text_copies_and_pastes_when_clipboard_confirms(monkeypatch):
     copied = {}
     monkeypatch.setattr(send_message, "_PYPERCLIP", True)
@@ -226,6 +186,23 @@ def test_search_in_app_falls_back_to_ctrl_f_when_click_fails(monkeypatch):
     send_message._search_in_app("Mom", "WhatsApp")
 
     assert hotkeys == [("ctrl", "f")]
+
+
+def test_search_in_app_waits_after_a_successful_click_before_clearing(monkeypatch):
+    """Regression: 'clicked search and stopped' - the post-hotkey delay
+    used to only exist on the Ctrl+F fallback path, so a successful click
+    went straight into Ctrl+A/Delete/paste with zero delay, possibly
+    before the click's focus change had taken effect."""
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+    monkeypatch.setattr(send_message, "_click_search_control", lambda app_name: True)
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: None), raising=False)
+    monkeypatch.setattr(send_message, "_clear_and_paste", lambda text: None)
+    slept = []
+    monkeypatch.setattr(send_message.time, "sleep", lambda s: slept.append(s))
+
+    send_message._search_in_app("Mom", "WhatsApp")
+
+    assert slept and slept[0] > 0
 
 
 def test_search_in_app_uses_ctrl_f_when_no_app_name_given(monkeypatch):

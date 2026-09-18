@@ -18,6 +18,34 @@ except ImportError:
 _SYSTEM = platform.system()
 
 
+def wait_for_clipboard(text: str, timeout: float = 1.0, poll: float = 0.05) -> bool:
+    """Polls pyperclip.paste() until it matches what was just copied, or
+    `timeout` runs out. Exists because of a real, observed race: this
+    process also runs a PyQt GUI, and Windows' clipboard logged
+    'qt.qpa.mime: Retrying to obtain clipboard' contention right around a
+    paste - a single fixed sleep() after copy() isn't a reliable enough
+    guarantee that Ctrl+V will paste the NEW text and not something stale
+    (observed live: "pressed Win and just stopped" - the Start Menu search
+    likely got pasted stale/empty clipboard content and found nothing to
+    open). Shared by this module's _type_app_name() and
+    actions/send_message.py's _paste_text() - one clipboard-race fix, not
+    two copies that can drift like _open_app used to. Returns False (not
+    True) on timeout so the caller can at least log it - still proceeds
+    either way, since there's nothing better to fall back to once the
+    paste hotkey actually fires."""
+    if not _PYPERCLIP:
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pyperclip.paste() == text:
+                return True
+        except Exception:
+            pass
+        time.sleep(poll)
+    return False
+
+
 def _type_app_name(app_name: str) -> None:
     """Types `app_name` into whatever currently has focus (the Start Menu
     search box) via clipboard-paste rather than pyautogui.write()'s raw
@@ -33,7 +61,8 @@ def _type_app_name(app_name: str) -> None:
     import pyautogui
     if _PYPERCLIP:
         pyperclip.copy(app_name)
-        time.sleep(0.1)
+        if not wait_for_clipboard(app_name):
+            print(f"[open_app] ⚠️ Clipboard did not confirm '{app_name}' before pasting into search - proceeding anyway.")
         pyautogui.hotkey("ctrl", "v")
     else:
         pyautogui.write(app_name, interval=0.05)

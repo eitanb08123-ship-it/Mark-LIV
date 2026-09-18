@@ -123,6 +123,77 @@ def test_type_app_name_falls_back_to_write_without_pyperclip(monkeypatch):
     assert calls["text"] == "WhatsApp"
 
 
+def test_type_app_name_waits_for_the_clipboard_before_pasting(monkeypatch):
+    """Regression: 'pressed Win and just stopped' - _type_app_name() used
+    to copy() and paste with only a fixed sleep() in between, the same
+    clipboard-vs-Qt race already fixed once in
+    actions/send_message.py::_paste_text(). A stale/empty paste into the
+    Start Menu search finds nothing to open."""
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+    waited = {}
+    monkeypatch.setattr(open_app, "wait_for_clipboard", lambda text: waited.setdefault("text", text) or True)
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(copy=lambda t: None), raising=False)
+    pressed = []
+    fake_pyautogui = SimpleNamespace(hotkey=lambda *a: pressed.append(a))
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+
+    open_app._type_app_name("WhatsApp")
+
+    assert waited["text"] == "WhatsApp"
+    assert pressed == [("ctrl", "v")]
+
+
+def test_wait_for_clipboard_returns_true_as_soon_as_it_matches(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(paste=lambda: "hello"), raising=False)
+
+    assert open_app.wait_for_clipboard("hello") is True
+
+
+def test_wait_for_clipboard_polls_until_it_matches(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+    calls = {"n": 0}
+
+    def _paste():
+        calls["n"] += 1
+        return "hello" if calls["n"] >= 3 else "stale"
+
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(paste=_paste), raising=False)
+
+    assert open_app.wait_for_clipboard("hello") is True
+    assert calls["n"] == 3
+
+
+def test_wait_for_clipboard_gives_up_after_timeout(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(paste=lambda: "stale"), raising=False)
+    # time.sleep is a no-op (autouse fixture), so time.time() driving the
+    # deadline is what actually needs to elapse - use a tiny timeout so the
+    # test doesn't really wait a full second.
+    result = open_app.wait_for_clipboard("hello", timeout=0.01, poll=0.001)
+
+    assert result is False
+
+
+def test_wait_for_clipboard_survives_a_paste_error(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+
+    def _boom():
+        raise RuntimeError("clipboard busy")
+
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(paste=_boom), raising=False)
+
+    result = open_app.wait_for_clipboard("hello", timeout=0.01, poll=0.001)
+
+    assert result is False
+
+
+def test_wait_for_clipboard_returns_false_immediately_without_pyperclip(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", False)
+
+    assert open_app.wait_for_clipboard("hello", timeout=1.0) is False
+
+
 def test_linux_xdg_open_failure_return_code_is_not_treated_as_success(monkeypatch):
     """xdg-open used to be trusted just for not raising - a nonzero exit
     (e.g. 'no application knows how to open this') was silently ignored."""
