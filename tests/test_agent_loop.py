@@ -11,6 +11,7 @@ import pytest
 
 from core import undo
 from core.coding_agent import agent_loop, permissions, workspace
+from memory import config_manager
 
 
 def _text(text):
@@ -105,18 +106,90 @@ def test_claude_call_failure_finishes_cleanly_instead_of_crashing(project_dir, m
     assert "boom" in result["remaining_issues"]
 
 
-def test_not_configured_short_circuits_without_calling_claude(project_dir, monkeypatch):
+def test_not_configured_short_circuits_without_calling_anything(project_dir, monkeypatch):
     monkeypatch.setattr(agent_loop.claude_client, "is_configured", lambda: False)
     monkeypatch.setattr(agent_loop.claude_client, "why_not_configured", lambda: "ANTHROPIC_API_KEY is not set.")
-    called = {"yes": False}
+    monkeypatch.setattr(config_manager, "is_configured", lambda: False)
+    called = {"claude": False, "gemini": False}
     monkeypatch.setattr(agent_loop.claude_client, "call_with_tools",
-                        lambda **kw: called.__setitem__("yes", True))
+                        lambda **kw: called.__setitem__("claude", True))
+    monkeypatch.setattr(agent_loop.gemini, "as_json",
+                        lambda *a, **kw: called.__setitem__("gemini", True))
 
     result = agent_loop.run_task("do something", project_path="proj")
 
     assert result["status"] == "failed"
-    assert called["yes"] is False
+    assert called == {"claude": False, "gemini": False}
     assert "ANTHROPIC_API_KEY" in result["remaining_issues"]
+
+
+# ── Free/Gemini fallback ─────────────────────────────────────────────────────
+# When ANTHROPIC_API_KEY isn't set but a Gemini key is (the one every other
+# JARVIS action already needs), the coding agent still works - just through
+# the JSON-decision convention core/gemini.py is called with, instead of
+# Claude's native tool-use.
+
+@pytest.fixture
+def gemini_project_dir(project_dir, monkeypatch):
+    monkeypatch.setattr(agent_loop.claude_client, "is_configured", lambda: False)
+    monkeypatch.setattr(agent_loop.claude_client, "why_not_configured", lambda: "ANTHROPIC_API_KEY is not set.")
+    monkeypatch.setattr(config_manager, "is_configured", lambda: True)
+    return project_dir
+
+
+def _scripted_gemini(monkeypatch, decisions):
+    it = iter(decisions)
+    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda *a, **kw: next(it))
+
+
+def test_gemini_fallback_is_used_when_claude_is_not_configured(gemini_project_dir, monkeypatch):
+    called = {"claude": False}
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools",
+                        lambda **kw: called.__setitem__("claude", True))
+    _scripted_gemini(monkeypatch, [
+        {"tool": "write_file", "args": {"path": "main.py", "content": "print('hi')"},
+         "narration": "Writing main.py"},
+        {"tool": "finished", "narration": "Done", "summary": "Wrote main.py", "tests_passed": True,
+         "files_changed": ["main.py"], "tests_run": [], "remaining_issues": ""},
+    ])
+
+    result = agent_loop.run_task("create a hello world script", project_path="proj")
+
+    assert called["claude"] is False
+    assert result["status"] == "success"
+    assert (gemini_project_dir / "proj" / "main.py").read_text() == "print('hi')"
+
+
+def test_gemini_fallback_run_command_pauses_for_confirmation(gemini_project_dir, monkeypatch):
+    _scripted_gemini(monkeypatch, [
+        {"tool": "run_command", "args": {"command": "python main.py"}, "narration": "Running it"},
+    ])
+
+    result = agent_loop.run_task("run the script", project_path="proj")
+
+    assert result["status"] == "awaiting_confirmation"
+    assert callable(result["resume"])
+
+
+def test_gemini_fallback_malformed_reply_finishes_cleanly(gemini_project_dir, monkeypatch):
+    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda *a, **kw: None)
+
+    result = agent_loop.run_task("do something", project_path="proj")
+
+    assert result["status"] == "failed"
+    assert result["steps"] == 0
+
+
+def test_gemini_fallback_hard_denied_command_is_skipped_not_paused(gemini_project_dir, monkeypatch):
+    _scripted_gemini(monkeypatch, [
+        {"tool": "run_command", "args": {"command": "sudo rm -rf /"}, "narration": "..."},
+        {"tool": "finished", "narration": "Done", "summary": "gave up", "tests_passed": False,
+         "files_changed": [], "tests_run": [], "remaining_issues": "blocked"},
+    ])
+
+    result = agent_loop.run_task("do something destructive", project_path="proj")
+
+    assert result["status"] in ("failed", "partial")
 
 
 def test_reply_with_no_tool_call_finishes_instead_of_looping(project_dir, monkeypatch):

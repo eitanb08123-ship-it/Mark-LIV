@@ -1,22 +1,36 @@
 """
 core/coding_agent/agent_loop.py — the coding agent's
 plan -> inspect project -> choose tool -> execute -> test -> read errors ->
-fix -> test again -> finished loop, with Claude (core/claude_client.py) as
-the coding brain.
+fix -> test again -> finished loop.
 
-Claude drives this with its OWN native tool-use, not a "reply with JSON"
-convention: each turn it may call one or more of the real tools in
-core/coding_agent/tools.py, or call the special `finished` tool with a
-structured report. Tool execution, permission gating
-(core/coding_agent/permissions.py) and the sandbox
-(core/coding_agent/workspace.py) are completely unchanged by this - Claude
-gets exactly the same guarded tools the rest of the app already built.
+Two interchangeable "brains" decide what to do next, chosen automatically
+in run_task() - Claude (core/claude_client.py) if ANTHROPIC_API_KEY is set,
+else Gemini (core/gemini.py, the same free-tier key every other JARVIS
+action already needs) as a free fallback so the coding agent works even
+with no Anthropic budget at all. Whichever brain is active, EVERY tool
+execution, permission gate (core/coding_agent/permissions.py), sandbox
+check (core/coding_agent/workspace.py) and confirmation pause/resume is
+identical - only how the "next step" decision itself is produced differs:
+
+  - Claude uses its own native tool-use: one turn may return one or more
+    real tool_use blocks (core/coding_agent/tools.py), or the special
+    `finished` tool with a structured report.
+  - Gemini has no native tool-use plumbed through core/gemini.py, so it
+    is asked to reply with ONE JSON object per turn naming the next tool -
+    the same convention this module used exclusively before Claude was
+    added, kept alive here specifically as the free path.
+
+Both are normalized into the same `_ToolCall` shape before a single shared
+pipeline (_process_tool_uses / _execute_tool / _run_loop) executes them, so
+nothing downstream needs to know which brain is driving.
 
 Bounded context: the running project structure and a short digest of past
-steps are refreshed into the SYSTEM prompt every turn (cheap, always
-current), while the raw Claude message history - the actual tool_use /
-tool_result exchange Claude reasons over turn-to-turn - is pruned to the
-last few rounds (_MAX_EXCHANGES_KEPT) rather than growing forever.
+steps are refreshed into the (system) prompt every turn (cheap, always
+current). For Claude specifically, the raw message history - the actual
+tool_use/tool_result exchange it reasons over turn-to-turn - is ALSO pruned
+to the last few rounds (_MAX_EXCHANGES_KEPT) rather than growing forever;
+Gemini's JSON-decision convention never accumulates raw history to begin
+with, so it needs no such pruning.
 
 Confirmation is handled exactly the way core/self_improvement/engine.py's
 awaiting_approval and actions/self_improve.py's confirm.request already do:
@@ -27,11 +41,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Optional
 
-from core import claude_client
+from core import claude_client, gemini
+from memory import config_manager
 
 from . import permissions, tools, workspace
-from memory.config_manager import get_coding_agent_max_steps
 
 MAX_STEPS_DEFAULT = 20
 _REPEAT_FAILURE_LIMIT = 3
@@ -181,6 +196,53 @@ Rules:
 - Call `finished` exactly once, when done or truly stuck - never stop by replying with plain text alone.
 """
 
+# The free/Gemini fallback: core/gemini.py has no tool-use plumbing, so this
+# is the "reply with one JSON decision per turn" convention this module used
+# exclusively before Claude was added - kept alive here as the free path.
+_GEMINI_PROMPT_TEMPLATE = """You are JARVIS's coding agent (free/Gemini mode), working ONLY inside this sandboxed project directory: {project_dir}
+You cannot see or touch anything outside it.
+
+Task: {task}
+
+Current project structure:
+{structure}
+
+Steps already taken (most recent last; earlier ones were dropped to keep context bounded):
+{digest}
+
+Choose EXACTLY ONE next step. Reply with ONLY a JSON object - no markdown, no explanation.
+
+To call a tool:
+{{"tool": "<one of read_file, write_file, edit_file, list_directory, search_code, create_directory, delete_file, run_command, run_tests, get_project_structure>", "args": {{...}}, "narration": "one short sentence, in the same language as the task, saying what you are about to do"}}
+
+Tool arguments:
+- read_file: {{"path": "relative/path"}}
+- write_file: {{"path": "relative/path", "content": "full file content", "overwrite": true}}
+- edit_file: {{"path": "relative/path", "content": "full NEW file content"}} (path must already exist)
+- list_directory: {{"path": "relative/path, or empty for the project root"}}
+- search_code: {{"query": "text to find", "path": "optional subpath", "glob": "optional filename glob e.g. *.py"}}
+- create_directory: {{"path": "relative/path"}}
+- delete_file: {{"path": "relative/path"}}
+- run_command: {{"command": "shell command", "timeout": 60}}
+- run_tests: {{"target": "optional path to one test file, omit to run everything"}}
+- get_project_structure: {{}}
+
+When the task is fully done (files written, it runs, tests pass if applicable), reply instead with:
+{{"tool": "finished", "narration": "...", "summary": "...", "files_changed": ["..."], "tests_run": ["..."], "tests_passed": true, "remaining_issues": ""}}
+
+If you are stuck and cannot make further progress, also reply with "finished", tests_passed false, and explain what remains in remaining_issues.
+
+JSON:"""
+
+
+@dataclass
+class _ToolCall:
+    """Normalized shape both brains produce, so the shared execution
+    pipeline below never needs to know which one is driving."""
+    id: str
+    name: str
+    input: dict
+
 
 @dataclass
 class _State:
@@ -189,7 +251,10 @@ class _State:
     player: object
     speak: object
     max_steps: int
-    messages: list = field(default_factory=list)
+    brain: str = ""
+    decide_fn: Optional[Callable[["_State"], dict]] = None
+    commit_fn: Optional[Callable[["_State", list], None]] = None
+    messages: list = field(default_factory=list)   # Claude only - Gemini leaves this empty
     history: list = field(default_factory=list)   # [{"tool","args","ok","output"}, ...] - full record, never pruned
     step: int = 0
 
@@ -370,9 +435,65 @@ def _process_tool_uses(state: _State, tool_use_blocks: list, results_so_far: lis
         state.history.append({"tool": block.name, "args": block.input, "ok": result.ok, "output": result.output})
         results_so_far.append(_tool_result_block(block.id, result.output, is_error=not result.ok))
 
-    state.messages.append({"role": "user", "content": results_so_far})
-    _prune_messages(state)
+    state.commit_fn(state, results_so_far)
     return _run_loop(state)
+
+
+def _decide_next_step_claude(state: _State) -> dict:
+    """Claude's native tool-use: returns {"kind": "tool_calls", "calls": [...],
+    "narration": str} or {"kind": "stuck", "text": str} if it replied with no
+    tool call at all. Appends its own turn to state.messages - the only
+    brain-specific bookkeeping that happens at decide-time rather than commit
+    time, since Claude's assistant turn must be recorded before any tool
+    results can follow it."""
+    response = claude_client.call_with_tools(
+        system=_system_prompt(state), messages=state.messages, tools=_TOOLS_SCHEMA,
+    )
+    blocks = list(response.content)
+    state.messages.append({"role": "assistant", "content": blocks})
+
+    narration = " ".join(
+        b.text.strip() for b in blocks
+        if getattr(b, "type", None) == "text" and getattr(b, "text", "").strip()
+    )
+
+    tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
+    if not tool_uses:
+        return {"kind": "stuck", "text": narration or "Stopped without calling a tool or finishing."}
+
+    calls = [_ToolCall(id=b.id, name=b.name, input=b.input) for b in tool_uses]
+    return {"kind": "tool_calls", "calls": calls, "narration": narration}
+
+
+def _commit_round_claude(state: _State, results: list) -> None:
+    state.messages.append({"role": "user", "content": results})
+    _prune_messages(state)
+
+
+def _decide_next_step_gemini(state: _State) -> dict:
+    """The free fallback: Gemini has no tool-use plumbed through
+    core/gemini.py, so it replies with one JSON decision per turn instead -
+    normalized into the same {"kind": ...} shape _run_loop expects."""
+    prompt = _GEMINI_PROMPT_TEMPLATE.format(
+        project_dir=state.project_dir, task=state.task,
+        structure=tools.get_project_structure(state.project_dir).output,
+        digest=_digest_text(state),
+    )
+    decision = gemini.as_json(prompt, tier=gemini.SMART, timeout_ms=45000, default=None)
+    if not isinstance(decision, dict) or not decision.get("tool"):
+        return {"kind": "stuck", "text": "The planning step returned a response that could not be understood."}
+
+    name = decision["tool"]
+    if name == _FINISHED_TOOL:
+        call_input = {k: v for k, v in decision.items() if k not in ("tool", "narration")}
+    else:
+        call_input = decision.get("args") or {}
+    call = _ToolCall(id="gemini-step", name=name, input=call_input)
+    return {"kind": "tool_calls", "calls": [call], "narration": decision.get("narration") or ""}
+
+
+def _commit_round_noop(state: _State, results: list) -> None:
+    pass   # Gemini's JSON-decision convention keeps no raw message history to commit
 
 
 def _run_loop(state: _State) -> dict:
@@ -383,33 +504,26 @@ def _run_loop(state: _State) -> dict:
         return _finalize_forced(state, f"Reached the {state.max_steps}-step limit before finishing.")
 
     try:
-        response = claude_client.call_with_tools(
-            system=_system_prompt(state), messages=state.messages, tools=_TOOLS_SCHEMA,
-        )
+        decision = state.decide_fn(state)
     except RuntimeError as e:
         return _finalize_forced(state, str(e))
 
     state.step += 1
-    blocks = list(response.content)
-    state.messages.append({"role": "assistant", "content": blocks})
 
-    for b in blocks:
-        if getattr(b, "type", None) == "text" and getattr(b, "text", "").strip():
-            _log(state, b.text.strip())
+    if decision["kind"] == "stuck":
+        return _finalize_forced(state, decision["text"])
 
-    tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
-    if not tool_uses:
-        text = " ".join(b.text.strip() for b in blocks
-                        if getattr(b, "type", None) == "text" and b.text.strip())
-        return _finalize_forced(state, text or "Stopped without calling a tool or finishing.")
-
-    return _process_tool_uses(state, tool_uses, [])
+    _log(state, decision.get("narration") or "")
+    return _process_tool_uses(state, decision["calls"], [])
 
 
 def run_task(task: str, project_path: str | None = None, player=None, speak=None,
             max_steps: int | None = None) -> dict:
-    """Runs the full agent loop for `task` inside the sandboxed workspace,
-    with Claude choosing and calling the tools.
+    """Runs the full agent loop for `task` inside the sandboxed workspace.
+
+    Picks Claude as the coding brain if ANTHROPIC_API_KEY is configured,
+    otherwise falls back to Gemini (free, same key every other JARVIS action
+    already needs) so the agent still works with no Anthropic budget at all.
 
     Returns either a finished result dict ({"status": "success"/"partial"/
     "failed", "summary", "files_changed", "tests_run", "tests_passed",
@@ -423,12 +537,27 @@ def run_task(task: str, project_path: str | None = None, player=None, speak=None
 
     state = _State(
         task=task, project_dir=project_dir, player=player, speak=speak,
-        max_steps=max_steps if max_steps is not None else get_coding_agent_max_steps(),
-        messages=[{"role": "user", "content": f"Task: {task}"}],
+        max_steps=max_steps if max_steps is not None else config_manager.get_coding_agent_max_steps(),
     )
 
-    if not claude_client.is_configured():
-        return _finalize_forced(state, f"Claude is not available: {claude_client.why_not_configured()}")
+    if claude_client.is_configured():
+        state.brain = "claude"
+        state.messages = [{"role": "user", "content": f"Task: {task}"}]
+        state.decide_fn = _decide_next_step_claude
+        state.commit_fn = _commit_round_claude
+    elif config_manager.is_configured():
+        state.brain = "gemini"
+        state.decide_fn = _decide_next_step_gemini
+        state.commit_fn = _commit_round_noop
+        _log(state, f"Claude not available ({claude_client.why_not_configured()}) "
+                    f"- using Gemini instead (free).")
+    else:
+        return _finalize_forced(
+            state,
+            f"Claude is not available ({claude_client.why_not_configured()}) and no Gemini API "
+            f"key is configured either - set ANTHROPIC_API_KEY, or configure a Gemini key, to "
+            f"use the coding agent.",
+        )
 
-    _log(state, f"Starting task in {project_dir}: {task}")
+    _log(state, f"Starting task in {project_dir} ({state.brain}): {task}")
     return _run_loop(state)
