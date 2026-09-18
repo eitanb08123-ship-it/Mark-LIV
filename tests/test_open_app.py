@@ -120,3 +120,34 @@ def test_open_app_reports_success_when_launcher_confirms(monkeypatch):
     result = open_app.open_app({"app_name": "Chrome"})
 
     assert result == "Opened Chrome."
+
+
+def test_normalize_maps_cs2_to_a_steam_launch_uri_not_the_bare_name():
+    """Regression: 'CS2' used to normalize to the literal string 'CS2' and get
+    typed into the OS search box, which only works if a shortcut happens to
+    exist with that exact name - it didn't, so nothing opened."""
+    assert open_app._normalize("CS2") == "steam://rungameid/730"
+    assert open_app._normalize("counter-strike 2") == "steam://rungameid/730"
+
+
+def test_macos_handles_uri_scheme_apps(monkeypatch):
+    monkeypatch.setattr(
+        open_app.subprocess, "run",
+        lambda *a, **kw: SimpleNamespace(returncode=0),
+    )
+    assert open_app._launch_macos("steam://rungameid/730") is True
+
+
+def test_macos_uri_scheme_failure_falls_through_to_open_dash_a(monkeypatch):
+    calls = []
+
+    def _fake_run(args, **kw):
+        calls.append(args)
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(open_app.subprocess, "run", _fake_run)
+    monkeypatch.setattr(open_app.shutil, "which", lambda name: None)
+    monkeypatch.setitem(__import__("sys").modules, "pyautogui", None)
+
+    assert open_app._launch_macos("steam://rungameid/730") is False
+    assert ["open", "steam://rungameid/730"] in calls

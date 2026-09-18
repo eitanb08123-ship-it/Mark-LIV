@@ -62,6 +62,17 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "steam":              {"Windows": "steam",                   "Darwin": "Steam",                "Linux": "steam"},
     "epic":               {"Windows": "EpicGamesLauncher",       "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
     "epic games":         {"Windows": "EpicGamesLauncher",       "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
+
+    # Steam games: typing the game's display name into the OS search only
+    # works if a Start Menu/desktop shortcut happens to exist with a matching
+    # name - unreliable, and exactly what produced the "typed CS2 into search,
+    # nothing opened" bug report. steam://rungameid/<appid> asks the Steam
+    # client itself to launch the game (installing it first if needed),
+    # regardless of shortcut naming - the same "URI scheme, no process to
+    # verify" path _launch_windows already has for things like ms-settings:.
+    "cs2":                {"Windows": "steam://rungameid/730",   "Darwin": "steam://rungameid/730", "Linux": "steam://rungameid/730"},
+    "counter-strike 2":   {"Windows": "steam://rungameid/730",   "Darwin": "steam://rungameid/730", "Linux": "steam://rungameid/730"},
+    "counter strike 2":   {"Windows": "steam://rungameid/730",   "Darwin": "steam://rungameid/730", "Linux": "steam://rungameid/730"},
 }
 
 
@@ -158,6 +169,15 @@ def _launch_windows(app_name: str) -> bool:
 
 
 def _launch_macos(app_name: str) -> bool:
+
+    if "://" in app_name:
+        try:
+            result = subprocess.run(["open", app_name], capture_output=True, timeout=8)
+            if result.returncode == 0:
+                time.sleep(1.0)
+                return True   # URI-scheme launches (steam://, ...) have no process to verify
+        except Exception:
+            pass
 
     try:
         result = subprocess.run(
