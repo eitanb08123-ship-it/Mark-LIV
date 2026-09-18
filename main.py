@@ -69,13 +69,14 @@ from actions.background_monitor import (
 )
 from actions.call_contact      import call_contact as _call_contact, windows_idle_seconds
 from actions.auto_reply        import auto_reply_cycle
+from actions.instagram_call_answer import run_cycle as _instagram_call_cycle
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
     get_call_checkin_enabled, get_call_checkin_interval_minutes, get_call_checkin_platform,
-    get_auto_reply_enabled, get_auto_reply_platform,
+    get_auto_reply_enabled, get_auto_reply_platform, get_instagram_auto_answer_enabled,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -2006,6 +2007,29 @@ class JarvisLive:
             except Exception as e:
                 self.ui.write_log(f"[AutoReply] Error: {e}")
 
+    # ── Instagram call auto-answer ───────────────────────────────────────────────
+
+    async def _run_instagram_call_answer(self) -> None:
+        """EXPERIMENTAL, OFF BY DEFAULT (see
+        actions/instagram_call_answer.py) - polls a persistent, VISIBLE
+        Playwright-controlled browser tab on Instagram's inbox and
+        auto-accepts anything that looks like an incoming call. Polls much
+        faster than the other checks here (a ringing call needs picking up
+        quickly) and, unlike _run_call_checkin/_run_auto_reply, does NOT
+        need the keyboard/mouse idle guard - Playwright drives its own
+        dedicated tab directly, not the user's real input devices, so
+        there's nothing of the user's to steal focus from."""
+        while True:
+            await asyncio.sleep(5)
+            if not get_instagram_auto_answer_enabled():
+                continue
+            try:
+                result = await asyncio.to_thread(_instagram_call_cycle)
+                if result:
+                    self.ui.write_log(f"[InstagramCall] {result}")
+            except Exception as e:
+                self.ui.write_log(f"[InstagramCall] Error: {e}")
+
     # ── Proactive mode ──────────────────────────────────────────────────────────
 
     async def _run_proactive_mode(self) -> None:
@@ -2207,6 +2231,7 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_call_checkin())
                     tg.create_task(self._run_auto_reply())
+                    tg.create_task(self._run_instagram_call_answer())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:

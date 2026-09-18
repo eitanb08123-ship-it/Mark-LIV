@@ -495,6 +495,17 @@ def save_auto_reply_platform(platform: str) -> None:
     _save_flag("auto_reply_platform", p if p in _AUTO_REPLY_PLATFORMS else "whatsapp")
 
 
+def get_instagram_auto_answer_enabled() -> bool:
+    """Whether JARVIS keeps a visible browser window on Instagram's inbox
+    and auto-accepts anything that looks like an incoming call. Off by
+    default - see actions/instagram_call_answer.py."""
+    return bool(load_api_keys().get("instagram_auto_answer_enabled", False))
+
+
+def save_instagram_auto_answer_enabled(enabled: bool) -> None:
+    _save_flag("instagram_auto_answer_enabled", enabled)
+
+
 def get_coding_agent_max_steps() -> int:
     """How many tool-call rounds the coding agent's loop may take before it
     is forced to stop and report what it has so far."""
