@@ -1,0 +1,198 @@
+"""
+actions/auto_reply.py — EXPERIMENTAL: automatically replies to incoming
+WhatsApp/Telegram messages with a Gemini-generated response, sent
+immediately with no human review. That "send immediately" behavior was an
+explicit, informed choice: the risk (an AI-written reply goes out under the
+user's identity, to whoever messaged, with no way to unsend it) was raised
+and the user chose speed over a confirm.py-gated review step anyway.
+
+WHY THIS IS EXPERIMENTAL, HONESTLY - read before relying on it: every other
+action in this project that drives the desktop clicks through a small,
+fixed keyboard sequence (open app, search, Enter) - it never needs to know
+what's already on screen. This module is different in kind: it has to read
+WhatsApp/Telegram Desktop's actual UI Automation tree to notice "a new
+message arrived, from whom." That tree was never inspected against a real
+running instance while writing this (no access to the user's machine from
+here) - core/... actions/game_updater.py already uses pywinauto (backend
+"uia") the same way for Steam's installer dialog, which is the precedent
+this follows, but _find_unread_chats()'s "match rows whose accessible text
+contains 'unread'" is a first guess based on WhatsApp Web's own English
+aria-labels (Electron/WhatsApp Desktop exposes the underlying Chromium
+accessibility tree via UIA on Windows), not a verified selector. It will
+likely need correction - especially if the app's display language isn't
+English - using real output from inspect_chat_window() below.
+
+Off by default. Turn on with
+memory.config_manager.save_auto_reply_enabled(True).
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import time
+
+from core import gemini
+from actions.send_message import _PYAUTOGUI, _open_app, _paste_text, _search_in_app
+from memory.config_manager import get_auto_reply_enabled, get_auto_reply_platform
+
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
+
+try:
+    from pywinauto import Application
+    _PYWINAUTO = True
+except ImportError:
+    _PYWINAUTO = False
+    Application = None
+
+_WINDOW_TITLE_PATTERNS = {
+    "whatsapp": "WhatsApp",
+    "telegram": "Telegram",
+}
+
+
+def _connect(app_name: str, timeout: float = 5.0):
+    """Connects to the already-open app window via UI Automation. Raises on
+    failure - callers decide how to report that."""
+    pattern = _WINDOW_TITLE_PATTERNS.get(app_name.lower(), app_name)
+    app = Application(backend="uia").connect(title_re=f".*{pattern}.*", timeout=timeout)
+    return app.top_window()
+
+
+def inspect_chat_window(app_name: str = "WhatsApp", max_depth: int = 3) -> str:
+    """DIAGNOSTIC, not used by the auto-reply loop itself. Connects to
+    `app_name`'s window (it must already be open) and returns pywinauto's
+    own control-identifiers dump - run this and share the output so
+    _find_unread_chats()'s matching can be corrected against what your
+    actual WhatsApp/Telegram window's accessibility tree looks like,
+    instead of the English-aria-label guess it starts with."""
+    if not _PYWINAUTO:
+        return "pywinauto is not installed (Windows-only)."
+    try:
+        win = _connect(app_name)
+    except Exception as e:
+        return f"Could not connect to {app_name} (is it open?): {e}"
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            win.print_control_identifiers(depth=max_depth)
+    except Exception as e:
+        return f"Connected to {app_name}, but could not dump its UI tree: {e}"
+    return buf.getvalue()[:6000]
+
+
+def _find_unread_chats(app_name: str) -> list[str]:
+    """Best-effort, uncalibrated (see module docstring): returns the full
+    accessible text of each chat-list row that mentions 'unread'. Empty on
+    any failure - never raises, since this runs unattended on a timer."""
+    if not _PYWINAUTO:
+        return []
+    try:
+        win = _connect(app_name)
+        rows = win.descendants(control_type="ListItem")
+        return [
+            text for r in rows
+            if (text := (r.window_text() or "")) and "unread" in text.lower()
+        ]
+    except Exception as e:
+        print(f"[AutoReply] Could not read {app_name}'s chat list: {e}")
+        return []
+
+
+def _generate_reply(incoming_text: str) -> str:
+    prompt = (
+        "You are replying to an incoming chat message on behalf of the "
+        "phone's owner, who is away from their device. Reply naturally and "
+        "briefly (one or two short sentences), in the same language as the "
+        "incoming message. Do not mention that you are an AI.\n\n"
+        f"Incoming message:\n{incoming_text}"
+    )
+    return gemini.text(prompt, tier=gemini.FAST, timeout_ms=15000, default="").strip()
+
+
+def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
+    # The row's accessible text typically leads with the sender's name -
+    # this is the same kind of guess _find_unread_chats() makes, and the
+    # same thing inspect_chat_window() output will help correct.
+    contact = chat_row_text.split("\n")[0].strip()
+    if not contact:
+        return "Could not determine who to reply to from the chat row's text."
+
+    reply_text = _generate_reply(chat_row_text)
+    if not reply_text:
+        return f"Gemini produced no reply for {contact} - nothing sent."
+
+    if not _open_app(app_name):
+        return f"Could not open {app_name}."
+    time.sleep(1.0)
+    _search_in_app(contact)
+    pyautogui.press("enter")
+    time.sleep(0.8)
+    _paste_text(reply_text)
+    pyautogui.press("enter")
+    time.sleep(0.3)
+
+    return f"Replied to {contact} via {app_name}: {reply_text[:80]}"
+
+
+def auto_reply_cycle(app_name: str | None = None) -> list[str]:
+    """One pass: find unread chats, generate and send a reply to each.
+    Returns one result string per chat found (empty list if none, or if the
+    feature/prereqs aren't available) - main.py's background loop logs
+    each one. Never raises."""
+    if not get_auto_reply_enabled():
+        return []
+    if not _PYAUTOGUI or pyautogui is None:
+        return ["auto_reply: PyAutoGUI is not installed."]
+    if not _PYWINAUTO:
+        return ["auto_reply: pywinauto is not installed (Windows-only feature right now)."]
+
+    app_name = app_name or get_auto_reply_platform().title()
+    unread = _find_unread_chats(app_name)
+    results = []
+    for row_text in unread:
+        try:
+            results.append(_reply_to_chat(app_name, row_text))
+        except Exception as e:
+            results.append(f"Could not reply to a chat: {e}")
+    return results
+
+
+def _inspect_chat_window_action(parameters: dict, player=None, **_) -> str:
+    app_name = (parameters or {}).get("app_name", "WhatsApp").strip() or "WhatsApp"
+    result = inspect_chat_window(app_name)
+    if player:
+        player.write_log(f"[InspectChatUI] dumped {len(result)} chars for {app_name} - see console/logs.")
+    print(result)
+    return (
+        f"Dumped {app_name}'s UI tree to the console/log (first 6000 chars). "
+        f"Copy it from there and share it so auto-reply's chat detection can "
+        f"be calibrated to what your window actually looks like."
+    )
+
+
+# ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
+TOOL = {
+    "name": "inspect_chat_window",
+    "description": (
+        "DIAGNOSTIC/DEVELOPER tool: dumps the UI Automation tree of an "
+        "already-open WhatsApp or Telegram Desktop window to the console, "
+        "so the auto-reply feature's unread-message detection can be "
+        "calibrated against what the real window looks like. Not part of "
+        "normal conversation - only use when explicitly asked to inspect "
+        "or debug the chat app's window structure."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "app_name": {
+                "type": "STRING",
+                "description": "WhatsApp or Telegram (default: WhatsApp). The app must already be open.",
+            },
+        },
+    },
+    "handler": _inspect_chat_window_action,
+}

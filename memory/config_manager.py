@@ -469,6 +469,32 @@ def save_call_checkin_platform(platform: str) -> None:
     _save_flag("call_checkin_platform", p if p in _CALL_CHECKIN_PLATFORMS else "instagram")
 
 
+def get_auto_reply_enabled() -> bool:
+    """Whether JARVIS auto-replies to incoming WhatsApp/Telegram messages
+    with an AI-generated response, sent immediately with no human review.
+    Off by default - see actions/auto_reply.py for the real risk this
+    carries (a wrong or inappropriate reply goes out under the user's own
+    identity and cannot be unsent)."""
+    return bool(load_api_keys().get("auto_reply_enabled", False))
+
+
+def save_auto_reply_enabled(enabled: bool) -> None:
+    _save_flag("auto_reply_enabled", enabled)
+
+
+_AUTO_REPLY_PLATFORMS = ("whatsapp", "telegram")
+
+
+def get_auto_reply_platform() -> str:
+    v = str(load_api_keys().get("auto_reply_platform", "whatsapp")).strip().lower()
+    return v if v in _AUTO_REPLY_PLATFORMS else "whatsapp"
+
+
+def save_auto_reply_platform(platform: str) -> None:
+    p = str(platform or "").strip().lower()
+    _save_flag("auto_reply_platform", p if p in _AUTO_REPLY_PLATFORMS else "whatsapp")
+
+
 def get_coding_agent_max_steps() -> int:
     """How many tool-call rounds the coding agent's loop may take before it
     is forced to stop and report what it has so far."""

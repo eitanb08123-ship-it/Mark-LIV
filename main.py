@@ -68,12 +68,14 @@ from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
 )
 from actions.call_contact      import call_contact as _call_contact, windows_idle_seconds
+from actions.auto_reply        import auto_reply_cycle
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
     get_call_checkin_enabled, get_call_checkin_interval_minutes, get_call_checkin_platform,
+    get_auto_reply_enabled, get_auto_reply_platform,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -1978,6 +1980,32 @@ class JarvisLive:
             except Exception as e:
                 self.ui.write_log(f"[CallCheckin] Error: {e}")
 
+    # ── Auto-reply ───────────────────────────────────────────────────────────────
+
+    async def _run_auto_reply(self) -> None:
+        """EXPERIMENTAL, OFF BY DEFAULT (see actions/auto_reply.py) - polls
+        the configured chat app for unread messages and replies immediately
+        with an AI-generated response, with no human review. That is an
+        explicit, informed choice made after the risk was raised, not an
+        oversight. Same idle-time guard as _run_call_checkin and for the
+        same reason: this drives the real keyboard/mouse."""
+        while True:
+            await asyncio.sleep(20)
+
+            if not get_auto_reply_enabled():
+                continue
+
+            idle = windows_idle_seconds()
+            if idle is not None and idle < 15:
+                continue
+
+            try:
+                results = await asyncio.to_thread(auto_reply_cycle, get_auto_reply_platform().title())
+                for r in results:
+                    self.ui.write_log(f"[AutoReply] {r}")
+            except Exception as e:
+                self.ui.write_log(f"[AutoReply] Error: {e}")
+
     # ── Proactive mode ──────────────────────────────────────────────────────────
 
     async def _run_proactive_mode(self) -> None:
@@ -2178,6 +2206,7 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_call_checkin())
+                    tg.create_task(self._run_auto_reply())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
