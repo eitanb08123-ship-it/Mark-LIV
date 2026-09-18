@@ -84,6 +84,45 @@ def test_windows_reports_failure_when_nothing_works(monkeypatch):
     assert open_app._launch_windows("some_nonexistent_app") is False
 
 
+def test_start_menu_fallback_pastes_the_app_name_instead_of_typing_it(monkeypatch):
+    """Regression: pyautogui.write() sends raw key events, which map to
+    whatever the ACTIVE KEYBOARD LAYOUT says a physical key produces.
+    Typing "WhatsApp" while a Hebrew layout is active does not type
+    W-h-a-t-s-A-p-p - it types whatever Hebrew letters share those key
+    positions (observed live: "ישאדשפפ"). _type_app_name() must paste via
+    the clipboard (layout-independent) whenever pyperclip is available,
+    never call pyautogui.write() with the app name in that case."""
+    monkeypatch.setattr(open_app, "_PYPERCLIP", True)
+    copied = {}
+    monkeypatch.setattr(open_app, "pyperclip", SimpleNamespace(copy=lambda t: copied.setdefault("text", t)),
+                        raising=False)
+    calls = {"write": False, "hotkey": []}
+    fake_pyautogui = SimpleNamespace(
+        PAUSE=0, press=lambda *a, **kw: None,
+        write=lambda *a, **kw: calls.__setitem__("write", True),
+        hotkey=lambda *a, **kw: calls["hotkey"].append(a),
+    )
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+    monkeypatch.setattr(open_app.shutil, "which", lambda name: None)
+    monkeypatch.setattr(open_app, "_is_process_running", lambda name, **kw: True)
+
+    assert open_app._launch_windows("WhatsApp") is True
+    assert copied["text"] == "WhatsApp"
+    assert calls["hotkey"] == [("ctrl", "v")]
+    assert calls["write"] is False
+
+
+def test_type_app_name_falls_back_to_write_without_pyperclip(monkeypatch):
+    monkeypatch.setattr(open_app, "_PYPERCLIP", False)
+    calls = {}
+    fake_pyautogui = SimpleNamespace(write=lambda text, **kw: calls.setdefault("text", text))
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+
+    open_app._type_app_name("WhatsApp")
+
+    assert calls["text"] == "WhatsApp"
+
+
 def test_linux_xdg_open_failure_return_code_is_not_treated_as_success(monkeypatch):
     """xdg-open used to be trusted just for not raising - a nonzero exit
     (e.g. 'no application knows how to open this') was silently ignored."""

@@ -9,7 +9,34 @@ try:
 except ImportError:
     _PSUTIL = False
 
+try:
+    import pyperclip
+    _PYPERCLIP = True
+except ImportError:
+    _PYPERCLIP = False
+
 _SYSTEM = platform.system()
+
+
+def _type_app_name(app_name: str) -> None:
+    """Types `app_name` into whatever currently has focus (the Start Menu
+    search box) via clipboard-paste rather than pyautogui.write()'s raw
+    keystrokes. write() sends key events that map to whatever the ACTIVE
+    KEYBOARD LAYOUT says a physical key produces - typing "WhatsApp" while
+    a Hebrew layout is active does not type W-h-a-t-s-A-p-p, it types
+    whatever Hebrew letters sit on those same physical keys. This is
+    exactly what produced the earlier "typed CS2 literally into search"
+    report (fixed separately with a Steam URI alias) and now "types
+    ישאדשפפ instead of WhatsApp" - both are the same root cause. Falls
+    back to write() when pyperclip isn't installed - degraded (layout-
+    dependent again) but not broken."""
+    import pyautogui
+    if _PYPERCLIP:
+        pyperclip.copy(app_name)
+        time.sleep(0.1)
+        pyautogui.hotkey("ctrl", "v")
+    else:
+        pyautogui.write(app_name, interval=0.05)
 
 _APP_ALIASES: dict[str, dict[str, str]] = {
 
@@ -156,7 +183,7 @@ def _launch_windows(app_name: str) -> bool:
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
+        _type_app_name(app_name)
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
