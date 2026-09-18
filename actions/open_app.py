@@ -300,6 +300,27 @@ _OS_LAUNCHERS = {
     "Linux":   _launch_linux,
 }
 
+def launch_app(app_name: str) -> bool:
+    """The verified launch-and-confirm logic behind open_app() - a plain
+    bool, importable directly by other actions (actions/send_message.py
+    uses this instead of keeping its own second, unverified "type into
+    search, hope" copy - the exact bug class this module's
+    _is_process_running() exists to catch)."""
+    launcher = _OS_LAUNCHERS.get(_SYSTEM)
+    if launcher is None:
+        return False
+    normalized = _normalize(app_name)
+    try:
+        if launcher(normalized):
+            return True
+        if normalized.lower() != app_name.lower():
+            return launcher(app_name)
+        return False
+    except Exception as e:
+        print(f"[open_app] Error launching {app_name!r}: {e}")
+        return False
+
+
 def open_app(
     parameters=None,
     response=None,
@@ -311,29 +332,19 @@ def open_app(
     if not app_name:
         return "No application name provided."
 
-    launcher = _OS_LAUNCHERS.get(_SYSTEM)
-    if launcher is None:
+    if _SYSTEM not in _OS_LAUNCHERS:
         return f"Unsupported operating system: {_SYSTEM}"
 
-    normalized = _normalize(app_name)
-    print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
-
+    print(f"[open_app] Launching: '{app_name}' ({_SYSTEM})")
     if player:
         player.write_log(f"[open_app] {app_name}")
 
-    try:
-        if launcher(normalized):
-            return f"Opened {app_name}."
-        if normalized.lower() != app_name.lower():
-            if launcher(app_name):
-                return f"Opened {app_name}."
-        return (
-            f"Could not confirm that {app_name} launched. "
-            f"It may still be loading, or it might not be installed."
-        )
-    except Exception as e:
-        print(f"[open_app] Error: {e}")
-        return f"Failed to open {app_name}: {e}"
+    if launch_app(app_name):
+        return f"Opened {app_name}."
+    return (
+        f"Could not confirm that {app_name} launched. "
+        f"It may still be loading, or it might not be installed."
+    )
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────

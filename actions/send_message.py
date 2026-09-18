@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+from actions.open_app import launch_app as _launch_app
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -64,54 +66,13 @@ def _clear_and_paste(text: str) -> None:
     _paste_text(text)
 
 def _open_app(app_name: str) -> bool:
-    _require_pyautogui()
-    os_name = _get_os()
-
-    try:
-        if os_name == "windows":
-            pyautogui.press("win")
-            time.sleep(0.5)
-            _paste_text(app_name)
-            time.sleep(0.6)
-            pyautogui.press("enter")
-            time.sleep(2.5)
-            return True
-
-        elif os_name == "mac":
-            result = subprocess.run(
-                ["open", "-a", app_name],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                result = subprocess.run(
-                    ["open", "-a", f"{app_name}.app"],
-                    capture_output=True, text=True, timeout=10,
-                )
-            time.sleep(2.5)
-            return result.returncode == 0
-
-        else: 
-            launched = False
-            for launcher in [
-                ["gtk-launch", app_name.lower()],
-                [app_name.lower()],
-            ]:
-                try:
-                    subprocess.Popen(
-                        launcher,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    launched = True
-                    break
-                except FileNotFoundError:
-                    continue
-            time.sleep(2.5)
-            return launched
-
-    except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open {app_name}: {e}")
-        return False
+    """Delegates to actions/open_app.py's launch_app() - this used to be a
+    second, independent "Win+search+Enter, then just assume it worked"
+    implementation that never got the psutil-based verification open_app.py
+    was fixed to do (a real bug: this module claimed "Message sent" even
+    when the app never actually opened, e.g. because the wrong window had
+    focus). One verified launcher now, not two copies that can drift."""
+    return _launch_app(app_name)
 
 
 def _open_browser_url(url: str) -> bool:
@@ -223,9 +184,18 @@ _PLATFORM_MAP = [
 
 
 def _resolve_platform(platform_str: str):
+    # Exact match first: a bare 2-letter alias like "ig" (Instagram) or "tg"
+    # (Telegram) is also a substring of unrelated words - "ig" inside
+    # "signal" was matching Instagram's handler for a plain "signal"
+    # request. Substring matching stays, but only for aliases long enough
+    # (>2 chars) that a false-positive match inside another word is
+    # implausible, and only once no keyword matched the input exactly.
     key = platform_str.lower().strip()
     for keywords, handler in _PLATFORM_MAP:
-        if any(k in key for k in keywords):
+        if key in keywords:
+            return handler
+    for keywords, handler in _PLATFORM_MAP:
+        if any(k in key for k in keywords if len(k) > 2):
             return handler
     return lambda r, m: _desktop_send(platform_str.strip().title(), r, m)
 
