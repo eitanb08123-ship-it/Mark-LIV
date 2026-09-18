@@ -130,6 +130,20 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
+def get_auto_improvement() -> bool:
+    """Whether the self-improvement engine may promote a passing, positively
+    evaluated change without stopping for human approval. Off by default:
+    even when on, core/self_improvement/safety_guard.py's denylist and
+    core/confirm.py's own gate for irreversible actions still apply
+    unconditionally - this flag only affects the ADDITIONAL approval step
+    self_improve() asks for on top of those."""
+    return load_api_keys().get("auto_improvement", False)
+
+
+def save_auto_improvement(enabled: bool) -> None:
+    _save_flag("auto_improvement", enabled)
+
+
 HUD_STYLES = ("face", "core")
 
 

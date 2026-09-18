@@ -271,7 +271,20 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | **LIII** | Wake word · Gemini 3.1 Flash Live · instant acknowledgment · self-describing action/plugin architecture |
 | **LIV** | Holographic avatar · viseme lip-sync · facial acting · face-as-status · push-to-talk · self-echo guard · runtime self-knowledge & limits |
 | *shared* | The last five above also shipped to LIII, LIV and LV at the same time — moving up a Mark never loses them |
-| **LV+** | Interrupt by voice · conversation history · plugin files: email · quiz mode · calendar · home assistant · 3D-printer |
+| **LV+** | Interrupt by voice · conversation history · plugin files: email · quiz mode · calendar · home assistant · 3D-printer · self-improvement engine |
+
+---
+
+## 🔁 Self-Improvement
+
+Mark LIV can analyze its own code, propose a fix for a specific problem, try
+it on an isolated git branch, test it, and only keep it if the test passes
+and an independent review agrees — nothing is ever written directly to the
+branch you have checked out. Ask it to **"find a way to improve yourself"**
+or **"fix X"**; significant changes wait for your on-screen approval first.
+A hard-coded denylist (not a prompt instruction) means it can never rewrite
+its own safety machinery, your credentials, or its own audit trail. Full
+design, commands, and limits: **[SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md)**.
 
 ---
 
@@ -339,12 +352,21 @@ Mark LIV/
 │   ├── game_updater.py       # Game update management (Steam / Epic)
 │   ├── code_helper.py        # Code review and generation
 │   ├── dev_agent.py          # Developer task agent
-│   └── desktop.py            # Desktop and taskbar control
+│   ├── desktop.py            # Desktop and taskbar control
+│   ├── self_analyze.py       # Self-improvement: read-only report (no changes)
+│   ├── self_improve.py       # Self-improvement: attempt a fix, isolated + tested
+│   ├── self_improvement_status.py   # List past/pending self-improvement attempts
+│   └── self_improvement_resolve.py  # Approve/reject a pending attempt by id
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
 │   ├── config_manager.py     # api_keys.json access — key, OS, name, voice, colour, toggles
 │   └── long_term.json        # Persistent store — created on first run
 ├── core/
+│   ├── self_improvement/     # Self-improvement engine — see SELF_IMPROVEMENT.md
+│   │   ├── engine.py          # Orchestrates OBSERVE→...→LOG
+│   │   ├── problem_detector.py, code_analyzer.py, planner.py, executor.py
+│   │   ├── test_runner.py, evaluator.py, rollback_manager.py, history.py
+│   │   └── safety_guard.py    # Hard denylist — cannot edit itself, credentials, or the audit trail
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
