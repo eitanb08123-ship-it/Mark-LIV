@@ -420,6 +420,46 @@ def save_coding_agent_auto_install(enabled: bool) -> None:
     _save_flag("coding_agent_auto_install", enabled)
 
 
+def get_coding_agent_max_steps() -> int:
+    """How many tool-call rounds the coding agent's loop may take before it
+    is forced to stop and report what it has so far."""
+    try:
+        return max(1, int(load_api_keys().get("coding_agent_max_steps", 20)))
+    except (TypeError, ValueError):
+        return 20
+
+
+def save_coding_agent_max_steps(max_steps: int) -> None:
+    _patch_config(coding_agent_max_steps=max(1, int(max_steps)))
+
+
+# ── Claude (core/claude_client.py) - the coding agent's "brain" ────────────────
+# The API key itself is NEVER stored here or hardcoded - only ever read from the
+# ANTHROPIC_API_KEY environment variable. Only non-secret tuning lives in config,
+# following the same get_X/save_X convention as every other setting in this file.
+
+def get_claude_model() -> str:
+    """The Claude model the coding agent's tool-use loop calls. '' falls back
+    to core.claude_client.DEFAULT_MODEL."""
+    return (load_api_keys().get("claude_model", "") or "").strip()
+
+
+def save_claude_model(model: str) -> None:
+    _patch_config(claude_model=(model or "").strip())
+
+
+def get_claude_timeout_ms() -> int:
+    """Per-call timeout for Claude's Messages API, in milliseconds."""
+    try:
+        return max(5000, int(load_api_keys().get("claude_timeout_ms", 60000)))
+    except (TypeError, ValueError):
+        return 60000
+
+
+def save_claude_timeout_ms(timeout_ms: int) -> None:
+    _patch_config(claude_timeout_ms=max(5000, int(timeout_ms)))
+
+
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}

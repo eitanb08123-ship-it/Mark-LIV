@@ -18,6 +18,11 @@ numpy>=1.24,<3
 pytest>=7,<9
 google-genai>=2.8.0,<3
 
+# ── Coding agent's "brain" (core/claude_client.py) ─────────────────────────────
+# Only ever authenticated via the ANTHROPIC_API_KEY environment variable - never
+# stored in config/api_keys.json. See CODING_AGENT.md.
+anthropic>=1.0,<2
+
 # ── Web search & browser control ──────────────────────────────────────────────
 requests>=2.31,<3
 beautifulsoup4>=4.12,<5

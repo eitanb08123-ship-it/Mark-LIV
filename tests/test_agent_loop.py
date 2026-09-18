@@ -1,14 +1,28 @@
 """
-core/coding_agent/agent_loop.py orchestration tests. Only the LLM planning
-step (gemini.as_json) is mocked with a scripted sequence of decisions -
-everything else (tool execution, permission gating, undo) runs for real
-inside a tmp_path workspace, the same way test_test_runner.py exercises a
-real subprocess rather than mocking it.
+core/coding_agent/agent_loop.py orchestration tests. Only the coding brain
+(claude_client.call_with_tools) is mocked, with fake Anthropic-shaped content
+blocks - everything else (tool execution, permission gating, undo, message
+pruning) runs for real inside a tmp_path workspace, the same way
+test_test_runner.py exercises a real subprocess rather than mocking it.
 """
+from types import SimpleNamespace
+
 import pytest
 
 from core import undo
 from core.coding_agent import agent_loop, permissions, workspace
+
+
+def _text(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use(id_, name, input_):
+    return SimpleNamespace(type="tool_use", id=id_, name=name, input=input_)
+
+
+def _response(*blocks):
+    return SimpleNamespace(content=list(blocks))
 
 
 @pytest.fixture(autouse=True)
@@ -21,24 +35,25 @@ def _clear_undo():
 @pytest.fixture
 def project_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace, "_get_configured_root", lambda: str(tmp_path))
-    # Deterministic regardless of what the real config file on disk says.
     monkeypatch.setattr(permissions, "get_coding_agent_auto_execute", lambda: False)
     monkeypatch.setattr(permissions, "get_coding_agent_auto_install", lambda: False)
+    monkeypatch.setattr(agent_loop.claude_client, "is_configured", lambda: True)
     return tmp_path
 
 
-def _scripted(monkeypatch, decisions):
-    it = iter(decisions)
-    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda prompt, **kw: next(it))
+def _scripted(monkeypatch, responses):
+    it = iter(responses)
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools", lambda **kw: next(it))
 
 
 def test_simple_write_then_finish(project_dir, monkeypatch):
     _scripted(monkeypatch, [
-        {"tool": "write_file", "args": {"path": "main.py", "content": "print('hi')"},
-         "narration": "Writing main.py"},
-        {"tool": "finished", "narration": "Done", "summary": "Wrote main.py",
-         "files_changed": ["main.py"], "tests_run": [], "tests_passed": True,
-         "remaining_issues": ""},
+        _response(_text("Writing main.py"),
+                 _tool_use("t1", "write_file", {"path": "main.py", "content": "print('hi')"})),
+        _response(_text("Done"),
+                 _tool_use("t2", "finished", {"summary": "Wrote main.py", "tests_passed": True,
+                                              "files_changed": ["main.py"], "tests_run": [],
+                                              "remaining_issues": ""})),
     ])
 
     result = agent_loop.run_task("create a hello world script", project_path="proj")
@@ -50,7 +65,7 @@ def test_simple_write_then_finish(project_dir, monkeypatch):
 
 def test_run_command_pauses_for_confirmation(project_dir, monkeypatch):
     _scripted(monkeypatch, [
-        {"tool": "run_command", "args": {"command": "python main.py"}, "narration": "Running it"},
+        _response(_tool_use("t1", "run_command", {"command": "python main.py"})),
     ])
 
     result = agent_loop.run_task("run the script", project_path="proj")
@@ -65,9 +80,10 @@ def test_resume_after_confirmation_continues_the_loop(project_dir, monkeypatch):
     (project_dir / "proj" / "main.py").write_text("print('ran')")
 
     _scripted(monkeypatch, [
-        {"tool": "run_command", "args": {"command": "python main.py"}, "narration": "Running it"},
-        {"tool": "finished", "narration": "Done", "summary": "Ran it", "tests_passed": True,
-         "files_changed": [], "tests_run": [], "remaining_issues": ""},
+        _response(_tool_use("t1", "run_command", {"command": "python main.py"})),
+        _response(_tool_use("t2", "finished", {"summary": "Ran it", "tests_passed": True,
+                                               "files_changed": [], "tests_run": [],
+                                               "remaining_issues": ""})),
     ])
 
     paused = agent_loop.run_task("run the script", project_path="proj")
@@ -77,18 +93,44 @@ def test_resume_after_confirmation_continues_the_loop(project_dir, monkeypatch):
     assert result["status"] == "success"
 
 
-def test_malformed_llm_response_finishes_cleanly(project_dir, monkeypatch):
-    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda prompt, **kw: None)
+def test_claude_call_failure_finishes_cleanly_instead_of_crashing(project_dir, monkeypatch):
+    def _boom(**kw):
+        raise RuntimeError("Claude call failed: boom")
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools", _boom)
 
     result = agent_loop.run_task("do something", project_path="proj")
 
     assert result["status"] == "failed"
     assert result["steps"] == 0
+    assert "boom" in result["remaining_issues"]
+
+
+def test_not_configured_short_circuits_without_calling_claude(project_dir, monkeypatch):
+    monkeypatch.setattr(agent_loop.claude_client, "is_configured", lambda: False)
+    monkeypatch.setattr(agent_loop.claude_client, "why_not_configured", lambda: "ANTHROPIC_API_KEY is not set.")
+    called = {"yes": False}
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools",
+                        lambda **kw: called.__setitem__("yes", True))
+
+    result = agent_loop.run_task("do something", project_path="proj")
+
+    assert result["status"] == "failed"
+    assert called["yes"] is False
+    assert "ANTHROPIC_API_KEY" in result["remaining_issues"]
+
+
+def test_reply_with_no_tool_call_finishes_instead_of_looping(project_dir, monkeypatch):
+    _scripted(monkeypatch, [_response(_text("I am not sure how to proceed."))])
+
+    result = agent_loop.run_task("do something ambiguous", project_path="proj")
+
+    assert result["status"] in ("failed", "partial")
+    assert result["steps"] == 0
 
 
 def test_repeated_identical_failure_stops_the_loop(project_dir, monkeypatch):
-    decision = {"tool": "read_file", "args": {"path": "missing.py"}, "narration": "Reading"}
-    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda prompt, **kw: dict(decision))
+    response = _response(_tool_use("t1", "read_file", {"path": "missing.py"}))
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools", lambda **kw: response)
 
     result = agent_loop.run_task("read a file that will never exist", project_path="proj")
 
@@ -98,9 +140,10 @@ def test_repeated_identical_failure_stops_the_loop(project_dir, monkeypatch):
 
 def test_hard_denied_command_is_skipped_not_paused(project_dir, monkeypatch):
     _scripted(monkeypatch, [
-        {"tool": "run_command", "args": {"command": "sudo rm -rf /"}, "narration": "..."},
-        {"tool": "finished", "narration": "Done", "summary": "gave up", "tests_passed": False,
-         "files_changed": [], "tests_run": [], "remaining_issues": "blocked"},
+        _response(_tool_use("t1", "run_command", {"command": "sudo rm -rf /"})),
+        _response(_tool_use("t2", "finished", {"summary": "gave up", "tests_passed": False,
+                                               "files_changed": [], "tests_run": [],
+                                               "remaining_issues": "blocked"})),
     ])
 
     result = agent_loop.run_task("do something destructive", project_path="proj")
@@ -109,10 +152,61 @@ def test_hard_denied_command_is_skipped_not_paused(project_dir, monkeypatch):
 
 
 def test_step_limit_stops_a_never_finishing_loop(project_dir, monkeypatch):
-    decision = {"tool": "list_directory", "args": {"path": ""}, "narration": "Looking around"}
-    monkeypatch.setattr(agent_loop.gemini, "as_json", lambda prompt, **kw: dict(decision))
+    response = _response(_tool_use("t1", "list_directory", {"path": ""}))
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools", lambda **kw: response)
 
     result = agent_loop.run_task("loop forever", project_path="proj", max_steps=5)
 
     assert result["steps"] == 5
     assert result["status"] in ("failed", "partial")
+
+
+def test_multiple_tool_uses_in_one_turn_are_all_executed(project_dir, monkeypatch):
+    _scripted(monkeypatch, [
+        _response(
+            _tool_use("t1", "write_file", {"path": "a.py", "content": "x = 1"}),
+            _tool_use("t2", "write_file", {"path": "b.py", "content": "y = 2"}),
+        ),
+        _response(_tool_use("t3", "finished", {"summary": "done", "tests_passed": True,
+                                               "files_changed": ["a.py", "b.py"], "tests_run": [],
+                                               "remaining_issues": ""})),
+    ])
+
+    result = agent_loop.run_task("write two files", project_path="proj")
+
+    assert result["status"] == "success"
+    assert (project_dir / "proj" / "a.py").read_text() == "x = 1"
+    assert (project_dir / "proj" / "b.py").read_text() == "y = 2"
+
+
+def test_message_history_is_pruned_but_bounded_and_alternating(project_dir, monkeypatch):
+    calls = {"n": 0}
+    seen_message_lengths = []
+
+    def _fake(**kw):
+        calls["n"] += 1
+        seen_message_lengths.append(len(kw["messages"]))
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles[0] == "user"
+        for a, b in zip(roles, roles[1:]):
+            assert a != b, "roles must strictly alternate for the Anthropic API"
+        if calls["n"] >= 10:
+            return _response(_tool_use(f"t{calls['n']}", "finished",
+                                       {"summary": "done", "tests_passed": True,
+                                        "files_changed": [], "tests_run": [], "remaining_issues": ""}))
+        return _response(_tool_use(f"t{calls['n']}", "list_directory", {"path": ""}))
+
+    monkeypatch.setattr(agent_loop.claude_client, "call_with_tools", _fake)
+
+    result = agent_loop.run_task("do many small steps", project_path="proj", max_steps=15)
+
+    assert result["status"] == "success"
+    # 9 list_directory rounds actually executed before the 10th call's
+    # `finished` - which itself is never added to the executed-tool history.
+    assert result["steps"] == 9
+    # ...while the raw Claude conversation sent on each call was kept bounded,
+    # even though 10 rounds happened.
+    max_len = 1 + agent_loop._MAX_EXCHANGES_KEPT * 2
+    assert max(seen_message_lengths) <= max_len
+    # 10 rounds with no pruning would have reached 1 + 2*9 = 19 messages by the last call.
+    assert seen_message_lengths[-1] < 19

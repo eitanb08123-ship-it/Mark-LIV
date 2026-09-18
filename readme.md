@@ -291,18 +291,21 @@ design, commands, and limits: **[SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md)**.
 ## 🛠️ Coding Agent
 
 Separately from the self-improvement engine above (which only ever touches
-Mark LIV's own source), JARVIS also has a real coding agent for **your**
-projects. Ask it to **"build me a Python game"**, **"create a website"**,
-**"fix the bug in my project"**, **"add a button to the app"**, **"install
-the missing dependency"**, or **"review the code and find problems"** — it
-inspects the project, reads/writes/edits files, runs commands and tests,
-reads back any errors, and retries across multiple steps until the task is
-done, entirely inside a sandboxed workspace folder
-(`~/Desktop/JarvisWorkspace` by default). Deleting a file, running an
-arbitrary shell command, or installing a dependency stops for your
-on-screen confirmation first, unless you turned on auto-approval for that
-category. Full design, tool list, and permission model:
-**[CODING_AGENT.md](CODING_AGENT.md)**.
+Mark LIV's own source, and still runs on Gemini), JARVIS also has a real
+coding agent for **your** projects, with **Claude** as its coding brain —
+its own native tool-use decides which file to read next, what to write, and
+when to run something, not a "reply with JSON" convention. Ask it to
+**"build me a Python game"**, **"create a website"**, **"fix the bug in my
+project"**, **"add a button to the app"**, **"install the missing
+dependency"**, or **"review the code and find problems"** — it inspects the
+project, reads/writes/edits files, runs commands and tests, reads back any
+errors, and retries across multiple steps until the task is done, entirely
+inside a sandboxed workspace folder (`~/Desktop/JarvisWorkspace` by
+default). Deleting a file, running an arbitrary shell command, or
+installing a dependency stops for your on-screen confirmation first, unless
+you turned on auto-approval for that category. Needs an `ANTHROPIC_API_KEY`
+environment variable — never stored in `config/api_keys.json`. Full design,
+tool list, and permission model: **[CODING_AGENT.md](CODING_AGENT.md)**.
 
 ---
 
@@ -332,6 +335,7 @@ python main.py
 | **API Key** | Free Gemini API key (entered on first launch → `config/api_keys.json`) |
 | **GPU** | **Not required.** The avatar is rendered in software |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
+| **Anthropic API Key** *(optional)* | Only needed for the Coding Agent (see below) — set `ANTHROPIC_API_KEY` as an environment variable, never entered into `config/api_keys.json` |
 
 ---
 
@@ -391,6 +395,8 @@ Mark LIV/
 │   │   ├── tools.py           # read/write/edit/list/search/create/delete/run_command/run_tests/get_project_structure
 │   │   ├── permissions.py     # Read/Write/Execute/Delete/Install gating — hard-denies + confirm.py
 │   │   └── workspace.py       # Sandbox root — nothing it touches may resolve outside it
+│   ├── claude_client.py       # Coding agent's brain — Claude tool-use, key from $ANTHROPIC_API_KEY only
+│   ├── llm_client.py         # Unused local-model (Ollama/LM Studio) client, left over from an earlier version
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
