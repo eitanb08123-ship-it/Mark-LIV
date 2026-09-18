@@ -92,7 +92,7 @@ def _call_via_desktop_app(app_name: str, receiver: str) -> str:
         return f"Could not open {app_name}."
 
     time.sleep(1.0)
-    _search_in_app(receiver)
+    _search_in_app(receiver, app_name)
     pyautogui.press("enter")
     time.sleep(1.2)
 

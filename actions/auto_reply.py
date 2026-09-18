@@ -271,7 +271,7 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     if not _open_app(app_name):
         return f"Could not open {app_name}."
     time.sleep(1.0)
-    _search_in_app(contact)
+    _search_in_app(contact, app_name)
     pyautogui.press("enter")
     time.sleep(0.8)
     _paste_text(reply_text)

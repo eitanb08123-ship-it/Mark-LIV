@@ -127,7 +127,7 @@ def test_reply_to_chat_uses_first_line_of_row_as_contact_and_sends(monkeypatch, 
 
     monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
     monkeypatch.setattr(auto_reply, "_open_app", lambda name: opened.setdefault("app", name) or True)
-    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q: searched.setdefault("query", q))
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": searched.setdefault("query", q))
     monkeypatch.setattr(auto_reply, "_paste_text", lambda text: pasted.setdefault("text", text))
     monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
 

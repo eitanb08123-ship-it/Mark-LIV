@@ -20,6 +20,23 @@ try:
 except ImportError:
     _PYPERCLIP = False
 
+try:
+    from pywinauto import Application
+    _PYWINAUTO = True
+except ImportError:
+    _PYWINAUTO = False
+    Application = None
+
+_WINDOW_TITLE_PATTERNS = {
+    "whatsapp": "WhatsApp",
+    "telegram": "Telegram",
+}
+
+# English and Hebrew: every screenshot shared while building this project
+# showed a Hebrew Windows/app UI (see actions/auto_reply.py's own
+# _UNREAD_MARKERS for the same reasoning).
+_SEARCH_CONTROL_MARKERS = ("search", "חיפוש", "find")
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -107,13 +124,50 @@ def _open_browser_url(url: str) -> bool:
         print(f"[SendMessage] ⚠️ Could not open browser: {e}")
         return False
 
-def _search_in_app(query: str) -> None:
-    _require_pyautogui()
-    os_name = _get_os()
-    search_hotkey = ("command", "f") if os_name == "mac" else ("ctrl", "f")
+def _click_search_control(app_name: str) -> bool:
+    """Best-effort: connects to app_name's already-open window (pywinauto)
+    and clicks whatever descendant looks like a search box/button (English
+    or Hebrew label - _SEARCH_CONTROL_MARKERS), instead of assuming Ctrl+F
+    reveals one. Observed live: WhatsApp Desktop's search is a real
+    clickable element in the chat-list pane - Ctrl+F alone left the app
+    doing nothing further after Ctrl+A/Delete, since there was never a
+    search box for that text to land in. Returns False on any failure or
+    when pywinauto isn't installed - the caller falls back to Ctrl+F."""
+    if not _PYWINAUTO:
+        return False
+    pattern = _WINDOW_TITLE_PATTERNS.get(app_name.lower(), app_name)
+    try:
+        win = Application(backend="uia").connect(title_re=f".*{pattern}.*", timeout=5.0).top_window()
+        for ctrl in win.descendants():
+            try:
+                name = (ctrl.window_text() or "").strip().lower()
+            except Exception:
+                continue
+            if name and any(marker in name for marker in _SEARCH_CONTROL_MARKERS):
+                ctrl.click_input()
+                return True
+    except Exception as e:
+        print(f"[SendMessage] ⚠️ Could not click a search control in {app_name}: {e}")
+    return False
 
-    pyautogui.hotkey(*search_hotkey)
-    time.sleep(0.5)
+
+def _search_in_app(query: str, app_name: str = "") -> None:
+    """Opens the app's search and types `query` into it. If `app_name` is
+    given (a real native desktop window - see _desktop_send()), tries
+    clicking an actual search control first; only falls back to the Ctrl+F
+    shortcut when that's unavailable or finds nothing - Ctrl+F was proven
+    unreliable live (see _click_search_control's docstring). `app_name`
+    is deliberately omitted by browser-based callers (_send_messenger) -
+    pywinauto's UI Automation doesn't reliably see into a browser's own
+    DOM the way it does an Electron desktop app's controls."""
+    _require_pyautogui()
+
+    if not (app_name and _click_search_control(app_name)):
+        os_name = _get_os()
+        search_hotkey = ("command", "f") if os_name == "mac" else ("ctrl", "f")
+        pyautogui.hotkey(*search_hotkey)
+        time.sleep(0.5)
+
     _clear_and_paste(query)
     time.sleep(1.0)
 
@@ -122,7 +176,7 @@ def _desktop_send(app_name: str, receiver: str, message: str) -> str:
         return f"Could not open {app_name}."
 
     time.sleep(1.0)
-    _search_in_app(receiver)
+    _search_in_app(receiver, app_name)
     pyautogui.press("enter")
     time.sleep(0.8)
 

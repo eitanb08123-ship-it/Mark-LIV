@@ -25,7 +25,7 @@ def working_desktop(monkeypatch):
     opened = {}
     searched = {}
     monkeypatch.setattr(call_contact, "_open_app", lambda name: opened.setdefault("app", name) or True)
-    monkeypatch.setattr(call_contact, "_search_in_app", lambda q: searched.setdefault("query", q))
+    monkeypatch.setattr(call_contact, "_search_in_app", lambda q, app_name="": searched.setdefault("query", q))
     monkeypatch.setattr(call_contact, "pyautogui", SimpleNamespace(
         press=lambda *a, **kw: None, hotkey=lambda *a, **kw: None,
     ))

@@ -90,6 +90,122 @@ def test_paste_text_still_pastes_after_a_clipboard_timeout(monkeypatch, capsys):
     assert "clipboard" in capsys.readouterr().out.lower()
 
 
+class _FakeControl:
+    def __init__(self, text):
+        self._text = text
+        self.clicked = False
+
+    def window_text(self):
+        return self._text
+
+    def click_input(self):
+        self.clicked = True
+
+
+class _FakeWinAutoWindow:
+    def __init__(self, controls):
+        self._controls = controls
+
+    def descendants(self):
+        return self._controls
+
+
+def test_click_search_control_returns_false_without_pywinauto(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", False)
+    assert send_message._click_search_control("WhatsApp") is False
+
+
+def test_click_search_control_clicks_the_first_matching_control(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    other = _FakeControl("New chat")
+    search = _FakeControl("Search or start a new chat")
+    fake_win = _FakeWinAutoWindow([other, search])
+    fake_app = SimpleNamespace(top_window=lambda: fake_win)
+    monkeypatch.setattr(send_message, "Application",
+                        lambda backend: SimpleNamespace(connect=lambda **kw: fake_app))
+
+    assert send_message._click_search_control("WhatsApp") is True
+    assert search.clicked is True
+    assert other.clicked is False
+
+
+def test_click_search_control_matches_hebrew_label(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    search = _FakeControl("חיפוש")
+    fake_win = _FakeWinAutoWindow([search])
+    fake_app = SimpleNamespace(top_window=lambda: fake_win)
+    monkeypatch.setattr(send_message, "Application",
+                        lambda backend: SimpleNamespace(connect=lambda **kw: fake_app))
+
+    assert send_message._click_search_control("WhatsApp") is True
+    assert search.clicked is True
+
+
+def test_click_search_control_returns_false_when_nothing_matches(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    fake_win = _FakeWinAutoWindow([_FakeControl("New chat"), _FakeControl("Settings")])
+    fake_app = SimpleNamespace(top_window=lambda: fake_win)
+    monkeypatch.setattr(send_message, "Application",
+                        lambda backend: SimpleNamespace(connect=lambda **kw: fake_app))
+
+    assert send_message._click_search_control("WhatsApp") is False
+
+
+def test_click_search_control_survives_a_connection_failure(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+
+    def _boom(backend):
+        raise RuntimeError("window not found")
+
+    monkeypatch.setattr(send_message, "Application", _boom)
+
+    assert send_message._click_search_control("WhatsApp") is False
+
+
+def test_search_in_app_prefers_clicking_over_ctrl_f_when_app_name_given(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+    monkeypatch.setattr(send_message, "_click_search_control", lambda app_name: True)
+    hotkeys = []
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: hotkeys.append(a)),
+                        raising=False)
+    monkeypatch.setattr(send_message, "_clear_and_paste", lambda text: None)
+
+    send_message._search_in_app("Mom", "WhatsApp")
+
+    assert hotkeys == []   # never fell back to Ctrl+F since the click succeeded
+
+
+def test_search_in_app_falls_back_to_ctrl_f_when_click_fails(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+    monkeypatch.setattr(send_message, "_click_search_control", lambda app_name: False)
+    hotkeys = []
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: hotkeys.append(a)),
+                        raising=False)
+    monkeypatch.setattr(send_message, "_clear_and_paste", lambda text: None)
+
+    send_message._search_in_app("Mom", "WhatsApp")
+
+    assert hotkeys == [("ctrl", "f")]
+
+
+def test_search_in_app_uses_ctrl_f_when_no_app_name_given(monkeypatch):
+    """Browser-based callers (_send_messenger) don't pass app_name - must
+    never try the pywinauto click path in that case."""
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+    called = {"click": False}
+    monkeypatch.setattr(send_message, "_click_search_control",
+                        lambda app_name: called.__setitem__("click", True) or True)
+    hotkeys = []
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: hotkeys.append(a)),
+                        raising=False)
+    monkeypatch.setattr(send_message, "_clear_and_paste", lambda text: None)
+
+    send_message._search_in_app("Mom")
+
+    assert called["click"] is False
+    assert hotkeys == [("ctrl", "f")]
+
+
 def test_open_app_delegates_to_open_app_module(monkeypatch):
     calls = []
     monkeypatch.setattr(send_message, "_launch_app", lambda name: calls.append(name) or True)
