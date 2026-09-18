@@ -9,6 +9,16 @@ Reuses actions/send_message.py's already-working desktop automation
 opening the app and finding the right chat is exactly the same problem
 send_message.py already solves.
 
+WHO IT CAN CALL - enforced in code, not by asking the model nicely: this can
+ONLY ever call the single contact name configured via
+memory.config_manager.save_owner_contact_name(...), the same "hard-coded,
+not prompt-based" rule core/self_improvement/safety_guard.py and
+core/coding_agent/workspace.py already apply to their own boundaries. There
+is deliberately no "receiver" parameter the model or a voice command could
+fill in - unlike send_message (meant for messaging arbitrary contacts),
+this tool exists specifically so JARVIS can call the phone's OWNER and
+nobody else, so it takes no name at all as input.
+
 HONESTY NOTE (this is the important part): neither WhatsApp nor Telegram
 Desktop exposes a documented keyboard shortcut or URL scheme for "start a
 voice call" - the call button is just an icon in the chat header. This
@@ -25,6 +35,7 @@ from __future__ import annotations
 import time
 
 from actions.send_message import _PYAUTOGUI, _open_app, _search_in_app
+from memory.config_manager import get_owner_contact_name
 
 try:
     import pyautogui
@@ -73,11 +84,15 @@ def call_contact(
     session_memory=None,
 ) -> str:
     params = parameters or {}
-    receiver = params.get("receiver", "").strip()
     platform = params.get("platform", "whatsapp").strip().lower()
 
+    receiver = get_owner_contact_name()
     if not receiver:
-        return "Please specify who to call."
+        return (
+            "No owner contact is configured yet, so I won't guess who to call. "
+            "Set it once with: memory.config_manager.save_owner_contact_name("
+            "'YourExactWhatsAppOrTelegramContactName')."
+        )
     if not _PYAUTOGUI or pyautogui is None:
         return "PyAutoGUI is not installed - cannot control the desktop to place a call."
 
@@ -101,26 +116,22 @@ def call_contact(
 TOOL = {
     "name": "call_contact",
     "description": (
-        "Places a REAL voice call to a contact through WhatsApp or Telegram "
-        "Desktop (VoIP over the internet - not the phone network, no cost, "
-        "no phone number needed). Use when the user asks JARVIS to call "
-        "them or someone else. This is best-effort desktop automation "
-        "(there is no official way to trigger it) - it cannot guarantee the "
-        "call actually connected, only that it tried."
+        "Places a REAL voice call to the phone's OWNER (and only the owner - "
+        "there is no way to name a different person) through WhatsApp or "
+        "Telegram Desktop (VoIP over the internet - not the phone network, "
+        "no cost, no phone number needed). Use when the user asks JARVIS to "
+        "call them. This is best-effort desktop automation (there is no "
+        "official way to trigger it) - it cannot guarantee the call "
+        "actually connected, only that it tried."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "receiver": {
-                "type": "STRING",
-                "description": "Contact name to call, exactly as saved in the app (e.g. the user's own saved contact name for themselves).",
-            },
             "platform": {
                 "type": "STRING",
                 "description": "WhatsApp or Telegram (default: WhatsApp).",
             },
         },
-        "required": ["receiver"],
     },
     "handler": call_contact,
 }

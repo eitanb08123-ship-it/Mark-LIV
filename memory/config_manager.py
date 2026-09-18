@@ -420,6 +420,18 @@ def save_coding_agent_auto_install(enabled: bool) -> None:
     _save_flag("coding_agent_auto_install", enabled)
 
 
+def get_owner_contact_name() -> str:
+    """The exact contact name, as saved in WhatsApp/Telegram, that
+    actions/call_contact.py is allowed to call. '' means not configured yet -
+    call_contact refuses to run rather than guess, so it can never be
+    talked into calling an arbitrary name it was merely told."""
+    return (load_api_keys().get("owner_contact_name", "") or "").strip()
+
+
+def save_owner_contact_name(name: str) -> None:
+    _patch_config(owner_contact_name=(name or "").strip())
+
+
 def get_coding_agent_max_steps() -> int:
     """How many tool-call rounds the coding agent's loop may take before it
     is forced to stop and report what it has so far."""
