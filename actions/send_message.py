@@ -40,6 +40,27 @@ def _require_pyautogui():
         raise RuntimeError("PyAutoGUI not installed. Run: pip install pyautogui")
 
 
+def _wait_for_clipboard(text: str, timeout: float = 1.0, poll: float = 0.05) -> bool:
+    """Polls pyperclip.paste() until it matches what was just copied, or
+    `timeout` runs out. Exists because of a real, observed race: this
+    process also runs a PyQt GUI, and Windows' clipboard logged
+    'qt.qpa.mime: Retrying to obtain clipboard' contention right around a
+    paste - a single fixed sleep() after copy() isn't a reliable enough
+    guarantee that Ctrl+V will paste the NEW text and not something stale.
+    Returns False (not True) on timeout so the caller can at least log it -
+    still proceeds either way, since there's nothing better to fall back to
+    once pyautogui.hotkey() actually fires (see the caller)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pyperclip.paste() == text:
+                return True
+        except Exception:
+            pass
+        time.sleep(poll)
+    return False
+
+
 def _paste_text(text: str) -> None:
     _require_pyautogui()
 
@@ -48,7 +69,8 @@ def _paste_text(text: str) -> None:
 
     if _PYPERCLIP:
         pyperclip.copy(text)
-        time.sleep(0.15)
+        if not _wait_for_clipboard(text):
+            print("[SendMessage] ⚠️ Clipboard did not confirm the new text before pasting - proceeding anyway.")
         pyautogui.hotkey(*paste_hotkey)
         time.sleep(0.1)
     else:

@@ -14,6 +14,82 @@ import pytest
 from actions import send_message
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleeping(monkeypatch):
+    monkeypatch.setattr(send_message.time, "sleep", lambda s: None)
+
+
+def test_wait_for_clipboard_returns_true_as_soon_as_it_matches(monkeypatch):
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=lambda: "hello"), raising=False)
+
+    assert send_message._wait_for_clipboard("hello") is True
+
+
+def test_wait_for_clipboard_polls_until_it_matches(monkeypatch):
+    calls = {"n": 0}
+
+    def _paste():
+        calls["n"] += 1
+        return "hello" if calls["n"] >= 3 else "stale"
+
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=_paste), raising=False)
+
+    assert send_message._wait_for_clipboard("hello") is True
+    assert calls["n"] == 3
+
+
+def test_wait_for_clipboard_gives_up_after_timeout(monkeypatch):
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=lambda: "stale"), raising=False)
+    # time.sleep is a no-op (autouse fixture), so time.time() driving the
+    # deadline is what actually needs to elapse - use a tiny timeout so the
+    # test doesn't really wait a full second.
+    result = send_message._wait_for_clipboard("hello", timeout=0.01, poll=0.001)
+
+    assert result is False
+
+
+def test_wait_for_clipboard_survives_a_paste_error(monkeypatch):
+    def _boom():
+        raise RuntimeError("clipboard busy")
+
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(paste=_boom), raising=False)
+
+    result = send_message._wait_for_clipboard("hello", timeout=0.01, poll=0.001)
+
+    assert result is False
+
+
+def test_paste_text_copies_and_pastes_when_clipboard_confirms(monkeypatch):
+    copied = {}
+    monkeypatch.setattr(send_message, "_PYPERCLIP", True)
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(
+        copy=lambda t: copied.setdefault("text", t),
+        paste=lambda: copied.get("text", ""),
+    ), raising=False)
+    pressed = []
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: pressed.append(a)), raising=False)
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+
+    send_message._paste_text("שלום")
+
+    assert copied["text"] == "שלום"
+    assert pressed == [("ctrl", "v")]
+
+
+def test_paste_text_still_pastes_after_a_clipboard_timeout(monkeypatch, capsys):
+    monkeypatch.setattr(send_message, "_PYPERCLIP", True)
+    monkeypatch.setattr(send_message, "pyperclip", SimpleNamespace(copy=lambda t: None, paste=lambda: "stale"), raising=False)
+    pressed = []
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(hotkey=lambda *a: pressed.append(a)), raising=False)
+    monkeypatch.setattr(send_message, "_PYAUTOGUI", True)
+    monkeypatch.setattr(send_message, "_wait_for_clipboard", lambda text: False)
+
+    send_message._paste_text("hi")
+
+    assert pressed == [("ctrl", "v")]
+    assert "clipboard" in capsys.readouterr().out.lower()
+
+
 def test_open_app_delegates_to_open_app_module(monkeypatch):
     calls = []
     monkeypatch.setattr(send_message, "_launch_app", lambda name: calls.append(name) or True)
