@@ -91,8 +91,9 @@ def test_paste_text_still_pastes_after_a_clipboard_timeout(monkeypatch, capsys):
 
 
 class _FakeControl:
-    def __init__(self, text):
+    def __init__(self, text, control_type="Edit"):
         self._text = text
+        self.control_type = control_type
         self.clicked = False
 
     def window_text(self):
@@ -103,11 +104,18 @@ class _FakeControl:
 
 
 class _FakeWinAutoWindow:
+    """Mirrors the real pywinauto contract _click_search_control() relies
+    on: descendants(control_type=X) filters at the "UIA" level, not in
+    Python - the whole reason for filtering by type in the first place
+    (see _SEARCH_CONTROL_TYPES's docstring: fetching every descendant
+    unfiltered was what made this visibly slow live)."""
     def __init__(self, controls):
         self._controls = controls
 
-    def descendants(self):
-        return self._controls
+    def descendants(self, control_type=None):
+        if control_type is None:
+            return self._controls
+        return [c for c in self._controls if c.control_type == control_type]
 
 
 def test_click_search_control_returns_false_without_pywinauto(monkeypatch):
@@ -139,6 +147,38 @@ def test_click_search_control_matches_hebrew_label(monkeypatch):
 
     assert send_message._click_search_control("WhatsApp") is True
     assert search.clicked is True
+
+
+def test_click_search_control_matches_a_button_typed_search_control(monkeypatch):
+    """The search control isn't always an editable field - some apps
+    expose it as a Button. Both control_type()s in _SEARCH_CONTROL_TYPES
+    must actually be checked, not just the first one."""
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    search_button = _FakeControl("Search", control_type="Button")
+    fake_win = _FakeWinAutoWindow([_FakeControl("New chat", control_type="Edit"), search_button])
+    fake_app = SimpleNamespace(top_window=lambda: fake_win)
+    monkeypatch.setattr(send_message, "Application",
+                        lambda backend: SimpleNamespace(connect=lambda **kw: fake_app))
+
+    assert send_message._click_search_control("WhatsApp") is True
+    assert search_button.clicked is True
+
+
+def test_click_search_control_only_scans_edit_and_button_types(monkeypatch):
+    """Regression: this used to call descendants() with no control_type
+    filter at all, walking every node in the window (hundreds to thousands
+    once real chat history is loaded) - a real, observed performance
+    problem live. A ListItem (chat row) matching 'search' in its text must
+    never be found or clicked."""
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    decoy = _FakeControl("Search results from Dana", control_type="ListItem")
+    fake_win = _FakeWinAutoWindow([decoy])
+    fake_app = SimpleNamespace(top_window=lambda: fake_win)
+    monkeypatch.setattr(send_message, "Application",
+                        lambda backend: SimpleNamespace(connect=lambda **kw: fake_app))
+
+    assert send_message._click_search_control("WhatsApp") is False
+    assert decoy.clicked is False
 
 
 def test_click_search_control_returns_false_when_nothing_matches(monkeypatch):

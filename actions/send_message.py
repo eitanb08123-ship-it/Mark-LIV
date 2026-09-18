@@ -124,6 +124,16 @@ def _open_browser_url(url: str) -> bool:
         print(f"[SendMessage] ⚠️ Could not open browser: {e}")
         return False
 
+# A search box in a chat app is an editable field or a button - never
+# ListItem/Text/whatever else fills a chat window (hundreds to thousands
+# of nodes once real chat history is loaded). Asking pywinauto to filter
+# by control_type is a UIA-level property match (fast); fetching every
+# descendant unfiltered and checking each one's text in Python is what
+# made this visibly slow live - the same lesson _find_unread_chats()
+# already applied by filtering to control_type="ListItem".
+_SEARCH_CONTROL_TYPES = ("Edit", "Button")
+
+
 def _click_search_control(app_name: str) -> bool:
     """Best-effort: connects to app_name's already-open window (pywinauto)
     and clicks whatever descendant looks like a search box/button (English
@@ -138,14 +148,15 @@ def _click_search_control(app_name: str) -> bool:
     pattern = _WINDOW_TITLE_PATTERNS.get(app_name.lower(), app_name)
     try:
         win = Application(backend="uia").connect(title_re=f".*{pattern}.*", timeout=5.0).top_window()
-        for ctrl in win.descendants():
-            try:
-                name = (ctrl.window_text() or "").strip().lower()
-            except Exception:
-                continue
-            if name and any(marker in name for marker in _SEARCH_CONTROL_MARKERS):
-                ctrl.click_input()
-                return True
+        for control_type in _SEARCH_CONTROL_TYPES:
+            for ctrl in win.descendants(control_type=control_type):
+                try:
+                    name = (ctrl.window_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if name and any(marker in name for marker in _SEARCH_CONTROL_MARKERS):
+                    ctrl.click_input()
+                    return True
     except Exception as e:
         print(f"[SendMessage] ⚠️ Could not click a search control in {app_name}: {e}")
     return False
