@@ -691,6 +691,65 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Communications (WhatsApp/Instagram auto-reply + call-answer) ─────
+        # Read-only status + the same on/off switch conversation already has
+        # via actions/auto_reply_settings.configure_auto_response() - no
+        # separate enable/disable logic duplicated here. NOTE: unlike the
+        # rest of this file, these two endpoints were never exercised against
+        # a real browser (this sandbox has no fastapi installed to run them
+        # against) - verify by hitting them once with real auth before
+        # wiring a UI to them.
+
+        @app.get("/api/communications/status")
+        async def communications_status(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory import conversation_history
+            from memory.config_manager import (
+                get_auto_reply_enabled, get_auto_reply_platforms,
+                get_whatsapp_call_answer_enabled, get_instagram_auto_answer_enabled,
+                get_call_checkin_enabled, get_call_checkin_interval_minutes,
+                get_call_checkin_platform, get_auto_reply_last_run, get_call_checkin_last_run,
+            )
+            now = time.time()
+            auto_reply_last = get_auto_reply_last_run()
+            checkin_last = get_call_checkin_last_run()
+            checkin_next_in = None
+            if get_call_checkin_enabled() and checkin_last:
+                due_at = checkin_last + get_call_checkin_interval_minutes() * 60
+                checkin_next_in = max(0, due_at - now)
+            return JSONResponse({
+                "auto_reply": {
+                    "enabled": get_auto_reply_enabled(),
+                    "platforms": get_auto_reply_platforms(),
+                    "last_run_seconds_ago": (now - auto_reply_last) if auto_reply_last else None,
+                },
+                "call_answer": {
+                    "whatsapp_enabled": get_whatsapp_call_answer_enabled(),
+                    "instagram_enabled": get_instagram_auto_answer_enabled(),
+                },
+                "call_checkin": {
+                    "enabled": get_call_checkin_enabled(),
+                    "platform": get_call_checkin_platform(),
+                    "interval_minutes": get_call_checkin_interval_minutes(),
+                    "last_run_seconds_ago": (now - checkin_last) if checkin_last else None,
+                    "next_run_in_seconds": checkin_next_in,
+                },
+                "active_conversations": conversation_history.active_conversations(),
+            })
+
+        @app.post("/api/communications/toggle")
+        async def communications_toggle(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from actions.auto_reply_settings import configure_auto_response
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            result = configure_auto_response(body or {})
+            return JSONResponse({"ok": True, "result": result})
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")

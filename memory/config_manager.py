@@ -527,6 +527,34 @@ def save_whatsapp_call_answer_enabled(enabled: bool) -> None:
     _save_flag("whatsapp_call_answer_enabled", enabled)
 
 
+def get_auto_reply_last_run() -> float:
+    """Unix timestamp of the last completed auto-reply poll cycle (whether
+    or not it found anything to reply to) - 0 if it has never run. Powers
+    the dashboard's Communications view ("last checked X ago")."""
+    try:
+        return float(load_api_keys().get("auto_reply_last_run", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def save_auto_reply_last_run(ts: float) -> None:
+    _save_flag("auto_reply_last_run", ts)
+
+
+def get_call_checkin_last_run() -> float:
+    """Unix timestamp of the last call-checkin attempt - 0 if it has never
+    run. Combined with get_call_checkin_interval_minutes(), lets the
+    dashboard show roughly when the next one is due."""
+    try:
+        return float(load_api_keys().get("call_checkin_last_run", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def save_call_checkin_last_run(ts: float) -> None:
+    _save_flag("call_checkin_last_run", ts)
+
+
 def get_coding_agent_max_steps() -> int:
     """How many tool-call rounds the coding agent's loop may take before it
     is forced to stop and report what it has so far."""

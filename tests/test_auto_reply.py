@@ -19,6 +19,21 @@ def _no_real_sleeping(monkeypatch):
     monkeypatch.setattr(auto_reply.time, "sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_conversation_history(monkeypatch):
+    """Isolates every test in this file from the real conversation_history
+    module (and the JSON file it would otherwise touch) by default: no
+    history, no "already handled" match. Individual tests override
+    `last_handled_incoming` or `format_for_prompt` to exercise the dedup /
+    context-injection paths specifically."""
+    monkeypatch.setattr(auto_reply.conversation_history, "format_for_prompt", lambda platform, contact: "")
+    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming", lambda platform, contact: "")
+    recorded = []
+    monkeypatch.setattr(auto_reply.conversation_history, "append_turn",
+                        lambda platform, contact, role, text: recorded.append((platform, contact, role, text)))
+    return recorded
+
+
 def test_disabled_by_default_returns_empty_without_touching_anything(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: False)
     called = {"yes": False}
@@ -74,19 +89,43 @@ def test_generate_reply_prompt_requires_matching_the_incoming_language(monkeypat
 
     monkeypatch.setattr(auto_reply.gemini, "text", _fake_text)
 
-    result = auto_reply._generate_reply("שלום, מה קורה?")
+    result = auto_reply._generate_reply("whatsapp", "Dana", "שלום, מה קורה?")
 
     assert result == "OK reply"
     assert "same language as the incoming message" in captured["prompt"]
     assert "שלום, מה קורה?" in captured["prompt"]
 
 
-def test_reply_to_chat_uses_first_line_of_row_as_contact_and_sends(monkeypatch):
+def test_generate_reply_includes_recent_conversation_history(monkeypatch):
+    """The user's explicit requirement: understand conversation context,
+    don't treat every message as a brand new conversation."""
+    captured = {}
+    monkeypatch.setattr(auto_reply.gemini, "text",
+                        lambda prompt, **kw: captured.setdefault("prompt", prompt) or "OK")
+    monkeypatch.setattr(auto_reply.conversation_history, "format_for_prompt",
+                        lambda platform, contact: "Them: Hi\nYou (JARVIS): Hey!")
+
+    auto_reply._generate_reply("whatsapp", "Dana", "How are you?")
+
+    assert "Them: Hi" in captured["prompt"]
+    assert "You (JARVIS): Hey!" in captured["prompt"]
+    assert "not a new conversation" in captured["prompt"].lower() or "NOT a new conversation" in captured["prompt"]
+
+
+def test_validate_reply_rejects_empty_and_caps_length():
+    assert auto_reply._validate_reply("") == ""
+    assert auto_reply._validate_reply("   ") == ""
+    assert auto_reply._validate_reply("  hi  ") == "hi"
+    huge = "x" * 5000
+    assert len(auto_reply._validate_reply(huge)) == auto_reply._MAX_REPLY_CHARS
+
+
+def test_reply_to_chat_uses_first_line_of_row_as_contact_and_sends(monkeypatch, _no_real_conversation_history):
     opened = {}
     searched = {}
     pasted = {}
 
-    monkeypatch.setattr(auto_reply, "_generate_reply", lambda text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
     monkeypatch.setattr(auto_reply, "_open_app", lambda name: opened.setdefault("app", name) or True)
     monkeypatch.setattr(auto_reply, "_search_in_app", lambda q: searched.setdefault("query", q))
     monkeypatch.setattr(auto_reply, "_paste_text", lambda text: pasted.setdefault("text", text))
@@ -99,17 +138,32 @@ def test_reply_to_chat_uses_first_line_of_row_as_contact_and_sends(monkeypatch):
     assert pasted["text"] == "Sure, on it!"
     assert "Dana" in result
     assert "Sure, on it!" in result
+    # both sides of the exchange get recorded for future context/dedup
+    assert ("whatsapp", "Dana", "them", "2 unread messages") in _no_real_conversation_history
+    assert ("whatsapp", "Dana", "jarvis", "Sure, on it!") in _no_real_conversation_history
 
 
 def test_reply_to_chat_skips_sending_when_gemini_produces_nothing(monkeypatch):
     called = {"opened": False}
-    monkeypatch.setattr(auto_reply, "_generate_reply", lambda text: "")
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "")
     monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
 
     result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
 
     assert called["opened"] is False
     assert "no reply" in result.lower()
+
+
+def test_reply_to_chat_skips_a_duplicate_of_the_last_handled_message(monkeypatch):
+    called = {"opened": False}
+    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming",
+                        lambda platform, contact: "2 unread messages")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert called["opened"] is False
+    assert "skipping duplicate" in result.lower()
 
 
 def test_auto_reply_cycle_replies_to_each_unread_chat(monkeypatch):
@@ -352,11 +406,11 @@ def test_reply_via_instagram_clicks_types_and_sends(monkeypatch):
     assert "Sure, on it!" in result
 
 
-def test_auto_reply_cycle_instagram_end_to_end(monkeypatch):
+def test_auto_reply_cycle_instagram_end_to_end(monkeypatch, _no_real_conversation_history):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
     monkeypatch.setattr(auto_reply, "_find_unread_instagram_chats", lambda: ["Dana\nunread"])
-    monkeypatch.setattr(auto_reply, "_generate_reply", lambda text: "On my way!")
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
     fake = _FakeBrowserSession()
     monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
 
@@ -365,3 +419,20 @@ def test_auto_reply_cycle_instagram_end_to_end(monkeypatch):
     assert len(result) == 1
     assert "Dana" in result[0]
     assert fake.typed == [("Message", "On my way!")]
+    assert ("instagram", "Dana", "them", "unread") in _no_real_conversation_history
+    assert ("instagram", "Dana", "jarvis", "On my way!") in _no_real_conversation_history
+
+
+def test_auto_reply_cycle_instagram_skips_a_duplicate_message(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    monkeypatch.setattr(auto_reply, "_find_unread_instagram_chats", lambda: ["Dana\nunread"])
+    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming",
+                        lambda platform, contact: "unread")
+    fake = _FakeBrowserSession()
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    assert "skipping duplicate" in result[0].lower()
+    assert fake.clicked == []

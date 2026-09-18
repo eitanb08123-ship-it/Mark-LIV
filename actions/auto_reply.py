@@ -31,6 +31,14 @@ Off by default. Turn on with
 memory.config_manager.save_auto_reply_enabled(True). Which platform(s) -
 any combination of whatsapp/telegram/instagram, watched simultaneously -
 via memory.config_manager.save_auto_reply_platforms([...]).
+
+Each reply is generated with the contact's recent conversation history
+(memory/conversation_history.py) so a back-and-forth isn't treated as a
+brand-new conversation on every message, and the same still-unread row
+isn't answered twice on consecutive polls (a text-equality heuristic - see
+that module's docstring for its known tradeoff). Every generated reply
+also passes through _validate_reply() - a minimal safety/validation step
+(non-empty, length-capped) between the AI brain and the sender.
 """
 from __future__ import annotations
 
@@ -40,6 +48,7 @@ import time
 
 from core import gemini
 from actions.send_message import _PYAUTOGUI, _open_app, _paste_text, _search_in_app
+from memory import conversation_history
 from memory.config_manager import get_auto_reply_enabled, get_auto_reply_platforms
 
 try:
@@ -172,47 +181,90 @@ def _reply_via_instagram(contact_hint: str, reply_text: str) -> str:
     return f"Replied to {contact_hint} via Instagram: {reply_text[:80]}"
 
 
+def _split_row(row_text: str) -> tuple[str, str]:
+    """A chat-row's accessible text as (contact, rest-of-row) - the
+    contact is always assumed to lead the row (the same guess
+    _find_unread_chats()/_find_unread_instagram_chats() make); the
+    remainder is treated as the incoming message content for history/dedup
+    purposes, uncalibrated as noted in the module docstring."""
+    contact, _, rest = row_text.partition("\n")
+    return contact.strip(), rest.strip()
+
+
+def _reply_to_instagram_row(row_text: str) -> str:
+    contact, incoming_text = _split_row(row_text)
+    if not contact:
+        return "Could not determine who to reply to from an inbox row."
+
+    if incoming_text and incoming_text == conversation_history.last_handled_incoming("instagram", contact):
+        return f"Already replied to the latest message from {contact} - skipping duplicate."
+
+    reply_text = _validate_reply(_generate_reply("instagram", contact, incoming_text))
+    if not reply_text:
+        return f"Gemini produced no reply for {contact} - nothing sent."
+
+    result = _reply_via_instagram(contact, reply_text)
+
+    conversation_history.append_turn("instagram", contact, "them", incoming_text)
+    conversation_history.append_turn("instagram", contact, "jarvis", reply_text)
+    return result
+
+
 def _auto_reply_cycle_instagram() -> list[str]:
     if not _BROWSER_CONTROL_AVAILABLE:
         return ["auto_reply: browser_control (playwright) is not available."]
 
     results = []
     for row_text in _find_unread_instagram_chats():
-        contact = row_text.split("\n")[0].strip()
-        if not contact:
-            results.append("Could not determine who to reply to from an inbox row.")
-            continue
-        reply_text = _generate_reply(row_text)
-        if not reply_text:
-            results.append(f"Gemini produced no reply for {contact} - nothing sent.")
-            continue
         try:
-            results.append(_reply_via_instagram(contact, reply_text))
+            results.append(_reply_to_instagram_row(row_text))
         except Exception as e:
-            results.append(f"Could not reply to {contact} via Instagram: {e}")
+            results.append(f"Could not reply to a chat: {e}")
     return results
 
 
-def _generate_reply(incoming_text: str) -> str:
+_MAX_REPLY_CHARS = 1000
+
+
+def _validate_reply(text: str) -> str:
+    """Minimal Response Safety/Validation step between the AI brain and
+    the sender: strips whitespace, rejects empty output, and caps length
+    so a runaway generation can't send an enormous message. Returns ''
+    when the reply should not be sent."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    return cleaned[:_MAX_REPLY_CHARS]
+
+
+def _generate_reply(platform: str, contact: str, incoming_text: str) -> str:
+    history = conversation_history.format_for_prompt(platform, contact)
+    history_block = (
+        f"\n\nConversation so far with this contact (most recent last) - "
+        f"stay consistent with it, this is NOT a new conversation:\n{history}"
+        if history else ""
+    )
     prompt = (
         "You are replying to an incoming chat message on behalf of the "
         "phone's owner, who is away from their device. Reply naturally and "
         "briefly (one or two short sentences), in the same language as the "
-        "incoming message. Do not mention that you are an AI.\n\n"
-        f"Incoming message:\n{incoming_text}"
+        "incoming message. Do not mention that you are an AI."
+        f"{history_block}\n\n"
+        f"New incoming message:\n{incoming_text}"
     )
     return gemini.text(prompt, tier=gemini.FAST, timeout_ms=15000, default="").strip()
 
 
 def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
-    # The row's accessible text typically leads with the sender's name -
-    # this is the same kind of guess _find_unread_chats() makes, and the
-    # same thing inspect_chat_window() output will help correct.
-    contact = chat_row_text.split("\n")[0].strip()
+    contact, incoming_text = _split_row(chat_row_text)
     if not contact:
         return "Could not determine who to reply to from the chat row's text."
+    platform = app_name.lower()
 
-    reply_text = _generate_reply(chat_row_text)
+    if incoming_text and incoming_text == conversation_history.last_handled_incoming(platform, contact):
+        return f"Already replied to the latest message from {contact} - skipping duplicate."
+
+    reply_text = _validate_reply(_generate_reply(platform, contact, incoming_text))
     if not reply_text:
         return f"Gemini produced no reply for {contact} - nothing sent."
 
@@ -225,6 +277,9 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     _paste_text(reply_text)
     pyautogui.press("enter")
     time.sleep(0.3)
+
+    conversation_history.append_turn(platform, contact, "them", incoming_text)
+    conversation_history.append_turn(platform, contact, "jarvis", reply_text)
 
     return f"Replied to {contact} via {app_name}: {reply_text[:80]}"
 

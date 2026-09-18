@@ -78,6 +78,7 @@ from memory.config_manager     import (
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
     get_call_checkin_enabled, get_call_checkin_interval_minutes, get_call_checkin_platform,
     get_auto_reply_enabled, get_instagram_auto_answer_enabled, get_whatsapp_call_answer_enabled,
+    save_auto_reply_last_run, save_call_checkin_last_run,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -1981,6 +1982,8 @@ class JarvisLive:
                 self.ui.write_log(f"[CallCheckin] {result}")
             except Exception as e:
                 self.ui.write_log(f"[CallCheckin] Error: {e}")
+            finally:
+                save_call_checkin_last_run(time.time())
 
     # ── Auto-reply ───────────────────────────────────────────────────────────────
 
@@ -2010,6 +2013,8 @@ class JarvisLive:
                     self.ui.write_log(f"[AutoReply] {r}")
             except Exception as e:
                 self.ui.write_log(f"[AutoReply] Error: {e}")
+            finally:
+                save_auto_reply_last_run(time.time())
 
     # ── Instagram call auto-answer ───────────────────────────────────────────────
 
