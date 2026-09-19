@@ -340,6 +340,7 @@ python main.py
 | **GPU** | **Not required.** The avatar is rendered in software |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
 | **Anthropic API Key** *(optional)* | Upgrades the Coding Agent's brain to Claude — set `ANTHROPIC_API_KEY` as an environment variable, never entered into `config/api_keys.json`. Without it, the Coding Agent still works, falling back to your existing Gemini key for free |
+| **OpenRouter API Key** *(optional)* | Adds a final fallback rung to `core/gemini.py`'s Live/REST ladder for one-shot calls (auto-reply, flight search, etc.) — used only once every Gemini rung is exhausted. Get a free key at [openrouter.ai/keys](https://openrouter.ai/keys), add `"openrouter_api_key": "sk-or-..."` to `config/api_keys.json`. Optionally set `"openrouter_model"` too (defaults to a free-tier model). Without it, this rung is simply skipped - Gemini's own ladder is unaffected |
 
 ---
 

@@ -61,6 +61,20 @@ THE LADDER, MEASURED
     Where the answer depends only on stable input, cache it and neither pool is
     touched twice: `plugins/_whatsapp_core.py` is the worked example — one
     request per WhatsApp language for the lifetime of the install.
+
+OPENROUTER: THE LAST RUNG, NOT A REPLACEMENT FOR ANY OF THE ABOVE
+    Optional and off by default (no key configured = the rung is skipped, not
+    an error). Added because Gemini's own free tier is one pool: Live and REST
+    both eventually run out on a bad day, and OpenRouter's free-tier models are
+    a genuinely separate quota to fall back to when that happens - the same
+    role it plays in the sibling project this was ported from. It sits behind
+    every Gemini rung, not ahead of any of them: Gemini is faster, better
+    integrated (grounding, images), and the dependency this app already has -
+    OpenRouter is insurance, not the default path. Text-only: images in
+    `contents` are dropped with a note rather than sent, since this rung is a
+    last resort, not a first-class multimodal path. Not part of the SEARCH
+    ladder, since grounded search needs Gemini's own grounding metadata, which
+    an OpenRouter completion cannot carry.
 """
 from __future__ import annotations
 
@@ -113,12 +127,17 @@ SEARCH = "search"  # grounded search — REST only, see below
 #     on REST — see SEARCH.
 LIVE = "live"
 
+# The last rung on FAST/SMART - see the module docstring's OPENROUTER section.
+# Skipped automatically (not an error) when no key is configured.
+OPENROUTER = "openrouter"
+
 _LADDERS = {
-    FAST: (LIVE, "gemini-2.5-flash-lite", "gemini-2.5-flash"),
-    SMART: (LIVE, "gemini-2.5-flash", "gemini-2.5-flash-lite"),
+    FAST: (LIVE, "gemini-2.5-flash-lite", "gemini-2.5-flash", OPENROUTER),
+    SMART: (LIVE, "gemini-2.5-flash", "gemini-2.5-flash-lite", OPENROUTER),
     # Grounded search needs response.candidates[...].grounding_metadata, which a
     # Live turn does not produce. REST only, and it says so rather than silently
-    # returning an answer with no sources behind it.
+    # returning an answer with no sources behind it. OpenRouter cannot carry
+    # grounding metadata either, so it is deliberately not on this ladder.
     SEARCH: ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"),
 }
 
@@ -204,6 +223,107 @@ def api_key(refresh: bool = False) -> str:
         except Exception:
             _cached_key = ""
         return _cached_key
+
+
+_cached_openrouter_key: str | None = None
+
+# A real, working free-tier model as of when this was written. OpenRouter's
+# free-model lineup changes over time (models are added/retired) - override
+# via "openrouter_model" in config/api_keys.json if this one stops being
+# available, the same way the module docstring's ladder rungs get swapped by
+# hand when a Gemini model is retired.
+_OPENROUTER_MODEL_FALLBACK = "meta-llama/llama-3.1-8b-instruct:free"
+
+
+def openrouter_api_key(refresh: bool = False) -> str:
+    """The OpenRouter key from config/api_keys.json, if the user has
+    configured one. Cached; never raises. Empty string means "not
+    configured" - callers must treat that as "skip this rung", not as a
+    failure worth logging like a real outage."""
+    global _cached_openrouter_key
+    with _key_lock:
+        if _cached_openrouter_key is not None and not refresh:
+            return _cached_openrouter_key
+        try:
+            data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
+            _cached_openrouter_key = str(data.get("openrouter_api_key") or "")
+        except Exception:
+            _cached_openrouter_key = ""
+        return _cached_openrouter_key
+
+
+def _openrouter_model() -> str:
+    try:
+        data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
+        return str(data.get("openrouter_model") or "").strip() or _OPENROUTER_MODEL_FALLBACK
+    except Exception:
+        return _OPENROUTER_MODEL_FALLBACK
+
+
+def _contents_to_text(contents) -> str:
+    """REST `contents` -> one plain-text prompt, for a provider (OpenRouter's
+    chat-completions API) that only takes text, not the genai SDK's Part
+    objects. Images are replaced with a note rather than silently dropped -
+    this rung is a last-resort fallback, not a first-class multimodal path,
+    and a caller that cares should know its image never made it through."""
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    parts = []
+    for item in items:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("text"):
+            parts.append(str(item["text"]))
+        elif getattr(item, "text", None):
+            parts.append(item.text)
+        elif getattr(item, "inline_data", None) is not None:
+            parts.append("[image omitted - the OpenRouter fallback rung is text-only]")
+    return "\n".join(parts)
+
+
+def _openrouter_call(contents, config, timeout_ms: int) -> "_Reply":
+    """One call to OpenRouter's OpenAI-compatible chat-completions endpoint -
+    see the module docstring's OPENROUTER section for why this rung exists
+    and where it sits. Raises on any failure (missing key, HTTP error,
+    timeout, empty reply) so call()'s existing per-rung try/except and
+    quota-cooldown handling applies to this rung exactly like every other
+    one - no special-casing needed there."""
+    import requests
+
+    key = openrouter_api_key()
+    if not key:
+        raise RuntimeError("no OpenRouter API key is configured")
+
+    system = ""
+    if config is not None:
+        system = getattr(config, "system_instruction", None) or \
+            (config.get("system_instruction") if isinstance(config, dict) else "") or ""
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": _openrouter_model(),
+            "messages": [
+                {"role": "system", "content": _ONE_SHOT_SYSTEM + (f"\n\n{system}" if system else "")},
+                {"role": "user", "content": _contents_to_text(contents)},
+            ],
+        },
+        # Same floor as Gemini's own REST calls (client()) - nothing in this
+        # module waits less than 10s or, on the caller's own say-so, longer.
+        timeout=max(10.0, timeout_ms / 1000.0),
+    )
+    if response.status_code == 429:
+        # Matching Gemini's own "429 RESOURCE_EXHAUSTED" wording so call()'s
+        # existing quota-cooldown detection (a plain substring check) treats
+        # this exactly like a Gemini rung running out of quota.
+        raise RuntimeError("429 RESOURCE_EXHAUSTED (OpenRouter)")
+    response.raise_for_status()
+    data = response.json()
+    text_out = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+    text_out = (text_out or "").strip()
+    if not text_out:
+        raise RuntimeError("OpenRouter reply came back empty")
+    return _Reply(text_out)
 
 
 def client(timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = ""):
@@ -394,6 +514,8 @@ def call(contents, tier: str = FAST, config=None,
                 if reply is not None:
                     return reply
                 raise RuntimeError("the Live turn came back empty")
+            if model == OPENROUTER:
+                return _openrouter_call(contents, config, timeout_ms)
             if cl is None:
                 cl = client(timeout_ms=timeout_ms, key=resolved_key)
             kwargs = {"model": model, "contents": contents}
