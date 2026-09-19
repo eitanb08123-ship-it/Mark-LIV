@@ -2014,17 +2014,28 @@ class JarvisLive:
             delay = 20 if consecutive_failures == 0 else min(20 * (2 ** consecutive_failures), 300)
             await asyncio.sleep(delay)
 
-            if not get_auto_reply_enabled():
+            enabled = get_auto_reply_enabled()
+            # DIAGNOSTIC heartbeat: proves the loop is actually ticking at
+            # all, independent of whether the feature is on - without this,
+            # "nothing happens" and "the loop never started" are
+            # indistinguishable from the log.
+            self.ui.write_log(f"[AutoReply] poll tick @ {time.strftime('%H:%M:%S')} - enabled={enabled}")
+
+            if not enabled:
                 consecutive_failures = 0
                 alerted = False
                 continue
 
             idle = windows_idle_seconds()
             if idle is not None and idle < 15:
+                self.ui.write_log(f"[AutoReply] skipped this tick - system idle only {idle:.0f}s (needs 15s+)")
                 continue
 
+            self.ui.write_log("[AutoReply] checking configured platform(s) for new messages...")
             try:
                 results = await asyncio.to_thread(auto_reply_cycle)
+                if not results:
+                    self.ui.write_log("[AutoReply] no unread/new messages found this cycle.")
                 for r in results:
                     self.ui.write_log(f"[AutoReply] {r}")
                 consecutive_failures = 0

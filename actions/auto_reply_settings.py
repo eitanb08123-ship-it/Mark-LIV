@@ -71,6 +71,11 @@ def _current_status() -> str:
 
 def configure_auto_response(parameters: dict, player=None, **_) -> str:
     params = parameters or {}
+    # DIAGNOSTIC: this is the ONLY entry point that turns auto-reply on/off
+    # (there is no separate "watch mode start/stop" function) - this line
+    # is how to confirm the trigger phrase actually reached this tool at
+    # all, rather than the model silently not calling it.
+    print(f"[AutoReplySettings] configure_auto_response called with: {params}")
 
     error = _validate_params(params)
     if error:

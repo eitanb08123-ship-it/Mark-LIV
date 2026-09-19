@@ -152,11 +152,18 @@ def _find_unread_chats(app_name: str) -> list[str]:
     try:
         win = _connect(app_name)
         rows = win.descendants(control_type="ListItem")
-        return [
+        unread = [
             text for r in rows
             if (text := (r.window_text() or ""))
             and any(marker in text.lower() for marker in _UNREAD_MARKERS)
         ]
+        # DIAGNOSTIC: the total row count is what tells "connected fine but
+        # nothing looks unread" (a real 0) apart from "the pywinauto
+        # connection/selector itself isn't finding the chat list at all"
+        # (rows would be empty too) - both look the same from the caller's
+        # side otherwise.
+        print(f"[AutoReply] {app_name}: scanned {len(rows)} chat-list row(s), {len(unread)} look unread.")
+        return unread
     except Exception as e:
         print(f"[AutoReply] Could not read {app_name}'s chat list: {e}")
         return []
@@ -244,6 +251,10 @@ def _find_unread_instagram_chats(session) -> list[dict]:
             "incoming_text": incoming_text,
             "thread_id": row.get("href"),
         })
+    # DIAGNOSTIC: same purpose as _find_unread_chats()'s scan count - tells
+    # "connected fine, nothing unread" apart from "query_rows() itself
+    # isn't finding the inbox rows at all".
+    print(f"[AutoReply] Instagram: scanned {len(rows or [])} inbox row(s), {len(results)} look unread.")
     return results
 
 
