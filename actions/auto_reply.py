@@ -61,12 +61,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import random
 import time
 
 from core import gemini
 from actions.send_message import _PYAUTOGUI, _ensure_foreground, _open_app, _paste_text, _search_in_app
 from memory import conversation_history
-from memory.config_manager import get_auto_reply_enabled, get_auto_reply_platforms
+from memory.config_manager import get_auto_reply_dry_run, get_auto_reply_enabled, get_auto_reply_platforms
 
 try:
     import pyautogui
@@ -317,14 +318,26 @@ def _reply_via_instagram(session, contact_hint: str, reply_text: str) -> str:
     return f"Replied to {contact_hint} via Instagram: {reply_text[:80]}"
 
 
-def _split_row(row_text: str) -> tuple[str, str]:
+def _split_row(row_text: str) -> tuple[str, str | None]:
     """A WhatsApp/Telegram chat-row's accessible text as (contact,
-    rest-of-row) - the contact is always assumed to lead the row (the same
-    guess _find_unread_chats() makes); the remainder is treated as the
-    incoming message content for history/dedup purposes, uncalibrated as
-    noted in the module docstring."""
-    contact, _, rest = row_text.partition("\n")
-    return contact.strip(), rest.strip()
+    incoming_text) - the contact is always assumed to lead the row (the same
+    guess _find_unread_chats() makes). `incoming_text` is None - not a
+    guess - whenever the row's structure doesn't look trustworthy enough to
+    call the remainder "the real message": no second line at all, or the
+    "contact" line itself contains an unread marker (meaning what we split
+    on isn't actually a name). Mirrors the same "skip rather than guess"
+    fix _find_unread_instagram_chats() already got for exactly this class
+    of bug (sending a marker/badge string to Gemini as if it were the
+    contact's real message) - callers must skip replying when this returns
+    None, not send whatever text happened to be there."""
+    contact, sep, rest = row_text.partition("\n")
+    contact = contact.strip()
+    rest = rest.strip()
+    if not sep or not rest:
+        return contact, None
+    if any(marker in contact.lower() for marker in _UNREAD_MARKERS):
+        return contact, None
+    return contact, rest
 
 
 def _reply_to_instagram_row(session, row: dict) -> str:
@@ -355,6 +368,11 @@ def _reply_to_instagram_row(session, row: dict) -> str:
     if not reply_text:
         return f"Gemini produced no reply for {contact} - nothing sent."
 
+    if get_auto_reply_dry_run():
+        conversation_history.append_turn("instagram", contact, "them", incoming_text, thread_id=thread_id)
+        conversation_history.append_turn("instagram", contact, "jarvis", reply_text, thread_id=thread_id)
+        return f"[DRY RUN] Would reply to {contact} via Instagram: {reply_text[:80]}"
+
     result = _reply_via_instagram(session, contact, reply_text)
     if not result.startswith("Replied"):
         return result
@@ -362,6 +380,22 @@ def _reply_to_instagram_row(session, row: dict) -> str:
     conversation_history.append_turn("instagram", contact, "them", incoming_text, thread_id=thread_id)
     conversation_history.append_turn("instagram", contact, "jarvis", reply_text, thread_id=thread_id)
     return result
+
+
+# A cap on how many chats get replied to in ONE poll cycle, and a small
+# randomized pause between consecutive real sends within that cycle - both
+# exist for the same reason: without them, coming back to (say) 15 unread
+# chats after being away means the very next poll drives pyautogui through
+# 15 back-to-back "open -> search -> paste -> send" sequences within about a
+# minute, stealing keyboard/mouse focus repeatedly and firing 15 AI-authored
+# messages before the user has any real chance to notice and disable the
+# feature. The per-contact cooldown (replied_too_recently()) does nothing
+# here since each contact in the burst is only being replied to once.
+# Whatever doesn't fit in one cycle is simply left "unread" and picked up on
+# the next poll - no separate queue needed.
+_MAX_REPLIES_PER_CYCLE = 5
+_MIN_DELAY_BETWEEN_REPLIES = 1.5
+_MAX_DELAY_BETWEEN_REPLIES = 4.0
 
 
 def _auto_reply_cycle_instagram() -> list[str]:
@@ -375,11 +409,23 @@ def _auto_reply_cycle_instagram() -> list[str]:
     # browser_control command) can't interleave mid-sequence and act on
     # whatever this just navigated/clicked to.
     with session.exclusive():
-        for row in _find_unread_instagram_chats(session):
+        rows = _find_unread_instagram_chats(session)
+        batch = rows[:_MAX_REPLIES_PER_CYCLE]
+        for i, row in enumerate(batch):
             try:
-                results.append(_reply_to_instagram_row(session, row))
+                result = _reply_to_instagram_row(session, row)
             except Exception as e:
-                results.append(f"Could not reply to a chat: {e}")
+                result = f"Could not reply to a chat: {e}"
+            results.append(result)
+            if result.startswith("Replied") and i < len(batch) - 1:
+                time.sleep(random.uniform(_MIN_DELAY_BETWEEN_REPLIES, _MAX_DELAY_BETWEEN_REPLIES))
+        deferred = len(rows) - len(batch)
+        if deferred > 0:
+            results.append(
+                f"{deferred} more unread chat(s) found but deferred to the next poll "
+                f"(per-cycle cap: {_MAX_REPLIES_PER_CYCLE}) - avoids sending a burst of "
+                f"messages all at once."
+            )
     return results
 
 
@@ -415,10 +461,35 @@ def _generate_reply(platform: str, contact: str, incoming_text: str) -> str:
     return gemini.text(prompt, tier=gemini.FAST, timeout_ms=15000, default="").strip()
 
 
+def _get_window_text(win, max_chars: int = 20000) -> str:
+    """Best-effort flat dump of every descendant control's own text - the
+    same class of check _reply_via_instagram() does via Playwright's
+    get_text(), just via pywinauto's UI Automation tree instead of a DOM.
+    Never raises; '' on any failure."""
+    texts = []
+    try:
+        for ctrl in win.descendants():
+            try:
+                t = ctrl.window_text()
+            except Exception:
+                continue
+            if t:
+                texts.append(t)
+    except Exception:
+        pass
+    return "\n".join(texts)[:max_chars]
+
+
 def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     contact, incoming_text = _split_row(chat_row_text)
     if not contact:
         return "Could not determine who to reply to from the chat row's text."
+    if incoming_text is None:
+        return (
+            f"Could not confidently extract {contact}'s actual message from the "
+            f"chat row (the row had no separate line of message text to read) - "
+            f"skipping rather than guessing."
+        )
     platform = app_name.lower()
 
     if conversation_history.is_duplicate_incoming(platform, contact, incoming_text):
@@ -435,6 +506,11 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     if not reply_text:
         return f"Gemini produced no reply for {contact} - nothing sent."
 
+    if get_auto_reply_dry_run():
+        conversation_history.append_turn(platform, contact, "them", incoming_text)
+        conversation_history.append_turn(platform, contact, "jarvis", reply_text)
+        return f"[DRY RUN] Would reply to {contact} via {app_name}: {reply_text[:80]}"
+
     if not _open_app(app_name):
         return f"Could not open {app_name}."
     if _ensure_foreground(app_name) is False:
@@ -450,6 +526,16 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     pyautogui.press("enter")
     time.sleep(0.3)
 
+    try:
+        window_text = _get_window_text(_connect(app_name))
+    except Exception:
+        window_text = ""
+    if reply_text[:50] not in window_text:
+        return (
+            f"Sent to {contact} via {app_name} but could not verify it actually "
+            f"appears in the conversation - not saving to history."
+        )
+
     conversation_history.append_turn(platform, contact, "them", incoming_text)
     conversation_history.append_turn(platform, contact, "jarvis", reply_text)
 
@@ -464,12 +550,23 @@ def _auto_reply_cycle_desktop_app(platform: str) -> list[str]:
 
     app_name = platform.title()
     unread = _find_unread_chats(app_name)
+    batch = unread[:_MAX_REPLIES_PER_CYCLE]
     results = []
-    for row_text in unread:
+    for i, row_text in enumerate(batch):
         try:
-            results.append(_reply_to_chat(app_name, row_text))
+            result = _reply_to_chat(app_name, row_text)
         except Exception as e:
-            results.append(f"Could not reply to a chat: {e}")
+            result = f"Could not reply to a chat: {e}"
+        results.append(result)
+        if result.startswith("Replied") and i < len(batch) - 1:
+            time.sleep(random.uniform(_MIN_DELAY_BETWEEN_REPLIES, _MAX_DELAY_BETWEEN_REPLIES))
+    deferred = len(unread) - len(batch)
+    if deferred > 0:
+        results.append(
+            f"{deferred} more unread chat(s) found but deferred to the next poll "
+            f"(per-cycle cap: {_MAX_REPLIES_PER_CYCLE}) - avoids sending a burst of "
+            f"messages all at once."
+        )
     return results
 
 

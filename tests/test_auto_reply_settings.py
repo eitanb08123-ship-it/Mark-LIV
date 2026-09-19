@@ -17,6 +17,7 @@ def _config_state(monkeypatch, **overrides):
         "auto_reply_platforms": ["instagram"],
         "whatsapp_call_answer_enabled": False,
         "instagram_auto_answer_enabled": False,
+        "auto_reply_dry_run": False,
     }
     state.update(overrides)
 
@@ -24,6 +25,7 @@ def _config_state(monkeypatch, **overrides):
     monkeypatch.setattr(settings, "get_auto_reply_platforms", lambda: state["auto_reply_platforms"])
     monkeypatch.setattr(settings, "get_whatsapp_call_answer_enabled", lambda: state["whatsapp_call_answer_enabled"])
     monkeypatch.setattr(settings, "get_instagram_auto_answer_enabled", lambda: state["instagram_auto_answer_enabled"])
+    monkeypatch.setattr(settings, "get_auto_reply_dry_run", lambda: state["auto_reply_dry_run"])
 
     monkeypatch.setattr(settings, "save_auto_reply_enabled",
                          lambda v: state.__setitem__("auto_reply_enabled", v))
@@ -33,6 +35,8 @@ def _config_state(monkeypatch, **overrides):
                          lambda v: state.__setitem__("whatsapp_call_answer_enabled", v))
     monkeypatch.setattr(settings, "save_instagram_auto_answer_enabled",
                          lambda v: state.__setitem__("instagram_auto_answer_enabled", v))
+    monkeypatch.setattr(settings, "save_auto_reply_dry_run",
+                         lambda v: state.__setitem__("auto_reply_dry_run", v))
     return state
 
 
@@ -48,6 +52,7 @@ def test_no_parameters_only_reports_status_and_changes_nothing(monkeypatch):
         "auto_reply_platforms": ["whatsapp"],
         "whatsapp_call_answer_enabled": False,
         "instagram_auto_answer_enabled": False,
+        "auto_reply_dry_run": False,
     }
 
 
@@ -183,6 +188,7 @@ def test_non_bool_auto_reply_enabled_is_rejected_without_writing(monkeypatch, ba
 
 @pytest.mark.parametrize("field", [
     "auto_reply_enabled", "whatsapp_call_answer_enabled", "instagram_call_answer_enabled",
+    "auto_reply_dry_run",
 ])
 @pytest.mark.parametrize("bad_value", ["true", "false", 0, 1, None])
 def test_every_bool_field_rejects_non_bool_values(monkeypatch, field, bad_value):
@@ -236,3 +242,36 @@ def test_one_invalid_field_blocks_the_whole_call_atomically(monkeypatch):
     assert "invalid" in result.lower()
     assert state["auto_reply_enabled"] is False
     assert state["whatsapp_call_answer_enabled"] is False
+
+
+# ── dry-run / shadow mode toggle ─────────────────────────────────────────────
+
+def test_enables_dry_run_mode(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({"auto_reply_dry_run": True})
+
+    assert state["auto_reply_dry_run"] is True
+    assert "dry-run mode turned on" in result.lower()
+
+
+def test_status_reports_dry_run_state(monkeypatch):
+    _config_state(monkeypatch, auto_reply_dry_run=True)
+
+    result = settings.configure_auto_response({})
+
+    assert "dry-run mode: on" in result.lower()
+
+
+def test_enabling_dry_run_alone_does_not_focus_anything(monkeypatch):
+    """Dry-run never touches the desktop - it must not trigger the
+    focus/maximize-on-activation behavior that a real auto_reply_enabled
+    toggle does."""
+    state = _config_state(monkeypatch)
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_dry_run": True})
+
+    assert calls == []

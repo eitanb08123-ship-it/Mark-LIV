@@ -488,6 +488,19 @@ def save_auto_reply_platforms(platforms: list[str]) -> None:
     _patch_config(auto_reply_platforms=cleaned or ["instagram"])
 
 
+def get_auto_reply_dry_run() -> bool:
+    """Shadow mode: runs the full detect -> generate pipeline but never
+    actually clicks/types/sends anything and never accepts a call - the
+    would-be reply is just logged, so a user can calibrate detection
+    quality (see actions/auto_reply.py's own uncalibrated-selector caveats)
+    before trusting it to really send. Off by default."""
+    return bool(load_api_keys().get("auto_reply_dry_run", False))
+
+
+def save_auto_reply_dry_run(enabled: bool) -> None:
+    _save_flag("auto_reply_dry_run", enabled)
+
+
 def get_instagram_auto_answer_enabled() -> bool:
     """Whether JARVIS keeps a visible browser window on Instagram's inbox
     and auto-accepts anything that looks like an incoming call. Off by

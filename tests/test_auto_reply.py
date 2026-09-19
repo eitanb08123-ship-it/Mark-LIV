@@ -218,6 +218,8 @@ def test_reply_to_chat_uses_first_line_of_row_as_contact_and_sends(monkeypatch, 
     monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": searched.setdefault("query", q))
     monkeypatch.setattr(auto_reply, "_paste_text", lambda text: pasted.setdefault("text", text))
     monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text", lambda win: "Sure, on it!")
 
     result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
 
@@ -303,6 +305,104 @@ def test_reply_to_chat_proceeds_when_focus_cannot_be_checked_at_all(monkeypatch)
     assert "focus" not in result.lower()
 
 
+# ── _split_row (item 2: skip rather than guess, same as Instagram's fix) ────
+
+def test_split_row_returns_the_message_when_structure_looks_trustworthy():
+    contact, incoming = auto_reply._split_row("Dana\nAre you free tonight?")
+    assert contact == "Dana"
+    assert incoming == "Are you free tonight?"
+
+
+def test_split_row_returns_none_with_no_second_line_at_all():
+    contact, incoming = auto_reply._split_row("Dana")
+    assert contact == "Dana"
+    assert incoming is None
+
+
+def test_split_row_returns_none_when_the_contact_line_is_itself_a_marker():
+    """The row's structure isn't what _find_unread_chats() assumed - what
+    got split as "contact" is actually an unread marker/badge, not a name."""
+    contact, incoming = auto_reply._split_row("3 unread messages\nDana")
+    assert incoming is None
+
+
+def test_reply_to_chat_skips_when_message_could_not_be_isolated(monkeypatch):
+    called = {"opened": False}
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana")
+
+    assert called["opened"] is False
+    assert "skipping rather than guessing" in result.lower()
+
+
+# ── post-send verification (item 4: confirm it actually landed) ────────────
+
+def test_reply_to_chat_does_not_save_history_on_unconfirmed_delivery(monkeypatch, _no_real_conversation_history):
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text", lambda win: "totally unrelated window content")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert "could not verify" in result.lower()
+    assert _no_real_conversation_history == []  # neither side of the exchange was saved
+
+
+def test_reply_to_chat_verification_survives_a_read_failure(monkeypatch, _no_real_conversation_history):
+    """If reading the window back fails outright (e.g. pywinauto not
+    installed, the app closed), that must be treated as unverified - not
+    raise and crash the whole poll cycle."""
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+
+    def _boom(app_name):
+        raise RuntimeError("window not found")
+    monkeypatch.setattr(auto_reply, "_connect", _boom)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert "could not verify" in result.lower()
+
+
+# ── dry-run / shadow mode ────────────────────────────────────────────────────
+
+def test_reply_to_chat_dry_run_never_touches_the_desktop(monkeypatch, _no_real_conversation_history):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_dry_run", lambda: True)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    called = {"opened": False}
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert called["opened"] is False
+    assert result.startswith("[DRY RUN]")
+    assert "Dana" in result and "Sure, on it!" in result
+    # still recorded, so dedup/cooldown keep working across dry-run cycles
+    assert ("whatsapp", "Dana", "them", "2 unread messages") in _no_real_conversation_history
+    assert ("whatsapp", "Dana", "jarvis", "Sure, on it!") in _no_real_conversation_history
+
+
+def test_reply_to_instagram_row_dry_run_never_clicks(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_dry_run", lambda: True)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": "you around?", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert fake.clicked == []
+    assert result.startswith("[DRY RUN]")
+    assert "Dana" in result and "On my way!" in result
+
+
 def test_auto_reply_cycle_replies_to_each_unread_chat(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
     monkeypatch.setattr(auto_reply, "_PYAUTOGUI", True)
@@ -335,6 +435,56 @@ def test_auto_reply_cycle_one_bad_chat_does_not_stop_the_others(monkeypatch):
     assert len(result) == 2
     assert "boom" in result[0]
     assert result[1] == "replied to Yossi"
+
+
+# ── per-cycle send cap (item 3): no burst of messages after a long absence ──
+
+def test_auto_reply_cycle_desktop_caps_replies_per_cycle_and_defers_the_rest(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_PYAUTOGUI", True)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    rows = [f"Contact{i}\nunread" for i in range(auto_reply._MAX_REPLIES_PER_CYCLE + 3)]
+    monkeypatch.setattr(auto_reply, "_find_unread_chats", lambda app: rows)
+    monkeypatch.setattr(auto_reply, "_reply_to_chat",
+                        lambda app, row: f"Replied to {row.splitlines()[0]} via WhatsApp: hi")
+
+    result = auto_reply.auto_reply_cycle("WhatsApp")
+
+    replied = [r for r in result if r.startswith("Replied")]
+    assert len(replied) == auto_reply._MAX_REPLIES_PER_CYCLE
+    assert any("deferred to the next poll" in r for r in result)
+    assert "3 more" in result[-1]
+
+
+def test_auto_reply_cycle_desktop_sleeps_between_consecutive_real_sends(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_PYAUTOGUI", True)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    monkeypatch.setattr(auto_reply, "_find_unread_chats", lambda app: ["Dana\nunread", "Yossi\nunread"])
+    monkeypatch.setattr(auto_reply, "_reply_to_chat",
+                        lambda app, row: f"Replied to {row.splitlines()[0]} via WhatsApp: hi")
+    sleeps = []
+    monkeypatch.setattr(auto_reply.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(auto_reply.random, "uniform", lambda a, b: 2.5)
+
+    auto_reply.auto_reply_cycle("WhatsApp")
+
+    assert sleeps == [2.5]  # one pause between 2 sends, none needed after the last
+
+
+def test_auto_reply_cycle_desktop_no_deferred_message_when_everything_fits(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_PYAUTOGUI", True)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    monkeypatch.setattr(auto_reply, "_find_unread_chats", lambda app: ["Dana\nunread"])
+    monkeypatch.setattr(auto_reply, "_reply_to_chat", lambda app, row: "Replied to Dana via WhatsApp: hi")
+
+    result = auto_reply.auto_reply_cycle("WhatsApp")
+
+    assert not any("deferred" in r for r in result)
 
 
 def test_find_unread_chats_matches_rows_mentioning_unread(monkeypatch):
@@ -812,3 +962,20 @@ def test_auto_reply_cycle_instagram_locks_the_session_for_the_whole_cycle(monkey
     auto_reply.auto_reply_cycle("instagram")
 
     assert entered["yes"] is True
+
+
+def test_auto_reply_cycle_instagram_caps_replies_per_cycle_and_defers_the_rest(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    n = auto_reply._MAX_REPLIES_PER_CYCLE + 2
+    rows = [_row(f"Contact{i}", preview="unread", href=f"https://instagram.com/direct/t/{i}/") for i in range(n)]
+    fake = _FakeBrowserSession(rows=rows)
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    replied = [r for r in result if r.startswith("Replied")]
+    assert len(replied) == auto_reply._MAX_REPLIES_PER_CYCLE
+    assert any("deferred to the next poll" in r for r in result)
+    assert "2 more" in result[-1]

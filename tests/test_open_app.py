@@ -67,6 +67,13 @@ def test_windows_falls_through_to_start_menu_when_popen_did_not_really_open_it(m
 
 def test_windows_start_menu_fallback_succeeds_once_process_is_verified(monkeypatch):
     monkeypatch.setattr(open_app.shutil, "which", lambda name: None)
+    # Deterministic regardless of whether pyperclip happens to be installed
+    # in the environment this test runs in (a real pyperclip.copy() would
+    # fail on a headless Linux box with no clipboard tool) - this test is
+    # about the Start-Menu-fallback/verification path generically, not
+    # about clipboard behavior specifically (see test_start_menu_fallback_*
+    # below for that).
+    monkeypatch.setattr(open_app, "_PYPERCLIP", False)
 
     fake_pyautogui = SimpleNamespace(
         PAUSE=0, press=lambda *a, **kw: None, write=lambda *a, **kw: None,

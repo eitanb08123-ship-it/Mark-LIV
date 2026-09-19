@@ -110,3 +110,14 @@ def test_save_plugin_enabled_merges_across_plugins():
     cm.save_plugin_enabled("plugin_b", False)
 
     assert cm.load_api_keys()["plugins_enabled"] == {"plugin_a": True, "plugin_b": False}
+
+
+def test_auto_reply_dry_run_off_by_default():
+    assert cm.get_auto_reply_dry_run() is False
+
+
+def test_auto_reply_dry_run_round_trips():
+    cm.save_auto_reply_dry_run(True)
+    assert cm.get_auto_reply_dry_run() is True
+    cm.save_auto_reply_dry_run(False)
+    assert cm.get_auto_reply_dry_run() is False

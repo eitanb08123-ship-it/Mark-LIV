@@ -17,6 +17,16 @@ WHAT CANNOT BE TOUCHED, EVER, REGARDLESS OF AUTO_IMPROVEMENT
       that can erase its own history could hide a bad attempt from the human
       reviewing it.
     - core/confirm.py: the approval gate itself.
+    - actions/auto_reply.py, memory/conversation_history.py: the OTHER
+      feature in this codebase explicitly built to be dangerous - it sends
+      AI-authored messages under the user's identity with no human review
+      (main.py's own docstring calls that "an explicit, informed choice made
+      after the risk was raised"). A request like "the auto-reply keeps
+      skipping messages, fix it" would otherwise be free to weaken
+      _validate_reply()'s length cap, replied_too_recently()'s cooldown, or
+      is_duplicate_incoming()'s dedup window - none of which trip any
+      keyword below - and if the planner scored it "low-risk," it could
+      auto-promote with AUTO_IMPROVEMENT=True and no human ever seeing it.
 
 Extending this list requires editing this file by hand, which is the point:
 no code path in the engine ever adds to _FORBIDDEN_PATHS or
@@ -35,15 +45,20 @@ _FORBIDDEN_PATHS = [
     BASE_DIR / "config" / "api_keys.json",
     BASE_DIR / "memory" / "self_improvement_history.json",
     BASE_DIR / "core" / "confirm.py",
+    BASE_DIR / "actions" / "auto_reply.py",
+    BASE_DIR / "memory" / "conversation_history.py",
 ]
 
 # If a proposed change to a file OUTSIDE this package's own source starts
 # referencing these names, that is worth a human's eyes before it goes
 # further - it is exactly the shape of an attempt to weaken the guard rails
-# from the outside (e.g. editing main.py to stop calling safety_guard).
+# from the outside (e.g. editing main.py to stop calling safety_guard, or
+# reimplementing auto-reply's safety primitives in a new file that isn't
+# itself on _FORBIDDEN_PATHS).
 _FORBIDDEN_KEYWORDS = (
     "api_key", "auth_token", "password", "secret", "credential",
     "auto_improvement", "safety_guard", "safetyviolation",
+    "auto_reply", "validate_reply", "replied_too_recently", "is_duplicate_incoming",
 )
 
 

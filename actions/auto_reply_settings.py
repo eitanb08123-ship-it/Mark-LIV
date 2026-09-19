@@ -22,10 +22,12 @@ from __future__ import annotations
 
 from actions.auto_reply import _focus_and_maximize
 from memory.config_manager import (
+    get_auto_reply_dry_run,
     get_auto_reply_enabled,
     get_auto_reply_platforms,
     get_instagram_auto_answer_enabled,
     get_whatsapp_call_answer_enabled,
+    save_auto_reply_dry_run,
     save_auto_reply_enabled,
     save_auto_reply_platforms,
     save_instagram_auto_answer_enabled,
@@ -33,7 +35,10 @@ from memory.config_manager import (
 )
 
 _VALID_PLATFORMS = ("whatsapp", "telegram", "instagram")
-_BOOL_FIELDS = ("auto_reply_enabled", "whatsapp_call_answer_enabled", "instagram_call_answer_enabled")
+_BOOL_FIELDS = (
+    "auto_reply_enabled", "whatsapp_call_answer_enabled",
+    "instagram_call_answer_enabled", "auto_reply_dry_run",
+)
 
 # Instagram is browser-based (no desktop window to bring to the foreground
 # the same way - see actions/instagram_call_answer.py's own docstring on
@@ -68,10 +73,12 @@ def _current_status() -> str:
     reply_platforms = ", ".join(get_auto_reply_platforms())
     wa_calls = "on" if get_whatsapp_call_answer_enabled() else "off"
     ig_calls = "on" if get_instagram_auto_answer_enabled() else "off"
+    dry_run = "on (nothing is actually sent - would-be replies are only logged)" if get_auto_reply_dry_run() else "off"
     return (
         f"Auto-reply to messages: {reply_state} (platforms: {reply_platforms}). "
         f"Auto-answer WhatsApp calls: {wa_calls}. "
-        f"Auto-answer Instagram calls: {ig_calls}."
+        f"Auto-answer Instagram calls: {ig_calls}. "
+        f"Dry-run mode: {dry_run}."
     )
 
 
@@ -111,6 +118,11 @@ def configure_auto_response(parameters: dict, player=None, **_) -> str:
         enabled = params["instagram_call_answer_enabled"]
         save_instagram_auto_answer_enabled(enabled)
         changed.append(f"Instagram call auto-answer turned {'on' if enabled else 'off'}")
+
+    if "auto_reply_dry_run" in params:
+        enabled = params["auto_reply_dry_run"]
+        save_auto_reply_dry_run(enabled)
+        changed.append(f"auto-reply dry-run mode turned {'on' if enabled else 'off'}")
 
     # Bring each currently-configured desktop-app platform's window to the
     # foreground and maximize it ONCE, right when this call activates
@@ -173,6 +185,15 @@ TOOL = {
             "instagram_call_answer_enabled": {
                 "type": "BOOLEAN",
                 "description": "Turn automatic answering of incoming Instagram calls on (true) or off (false).",
+            },
+            "auto_reply_dry_run": {
+                "type": "BOOLEAN",
+                "description": (
+                    "Turn dry-run/shadow mode on (true) or off (false) - when on, auto-reply still "
+                    "detects messages and generates replies, but never actually sends them (just "
+                    "logs what it would have sent). Use this when the user wants to test/calibrate "
+                    "auto-reply before trusting it to really send messages."
+                ),
             },
         },
     },
