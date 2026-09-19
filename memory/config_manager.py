@@ -1,6 +1,9 @@
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
+from threading import Lock
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -11,30 +14,26 @@ BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
 
+# Guards every read-modify-write below, covering the WHOLE operation (read,
+# compute, write) - not just the write. Background loops (auto-reply's
+# last-run timestamp), the dashboard, and a user changing a setting can all
+# land here at nearly the same moment; without this, one write can silently
+# overwrite another's change (a read-modify-write race), which is exactly
+# how a background timestamp update could clobber a setting someone just
+# changed, or vice versa.
+_lock = Lock()
+
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 def config_exists() -> bool:
     return CONFIG_FILE.exists()
 
-def save_api_keys(gemini_api_key: str) -> None:
-    ensure_config_dir()
 
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-
-    data["gemini_api_key"] = gemini_api_key.strip()
-
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
-
-def load_api_keys() -> dict:
+def _read_unlocked() -> dict:
+    """Loads the config file. Named _unlocked because every caller either
+    already holds `_lock` (the read half of a read-modify-write) or is
+    load_api_keys(), which takes the lock itself."""
     if not CONFIG_FILE.exists():
         return {}
     try:
@@ -42,6 +41,66 @@ def load_api_keys() -> dict:
     except Exception as e:
         print(f"❌ Failed to load api_keys.json: {e}")
         return {}
+
+
+def _atomic_write(data: dict) -> None:
+    """Writes `data` to CONFIG_FILE without ever leaving it half-written on
+    disk: write to a temp file in the same directory, then os.replace() it
+    over the real file - an atomic rename on both POSIX and Windows as long
+    as both paths share a filesystem (guaranteed here - same directory).
+    A crash or a concurrent reader mid-write can no longer see, or be left
+    with, a truncated/corrupt JSON file. Caller must hold `_lock`."""
+    ensure_config_dir()
+    fd, tmp_path = tempfile.mkstemp(dir=str(CONFIG_DIR), prefix=".api_keys_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def load_api_keys() -> dict:
+    with _lock:
+        return _read_unlocked()
+
+
+def _patch_config(**fields) -> None:
+    """Read-modify-write one or more top-level keys in api_keys.json,
+    atomically and under `_lock` for the whole operation. Every simple
+    setter in this file goes through this (or _patch_nested()/
+    _save_flag() below) instead of open-coding read-modify-write - one
+    place where corrupt-file recovery, atomicity, and locking are handled,
+    not nine slightly different copies."""
+    with _lock:
+        data = _read_unlocked()
+        data.update(fields)
+        _atomic_write(data)
+
+
+def _patch_nested(top_key: str, updates: dict) -> None:
+    """Merges `updates` into a dict stored under `top_key` (e.g.
+    "turn_tuning"), atomically and under the same lock as every other
+    write here - the nested-dict equivalent of _patch_config()."""
+    with _lock:
+        data = _read_unlocked()
+        cur = data.get(top_key)
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        cur.update(updates or {})
+        data[top_key] = cur
+        _atomic_write(data)
+
+
+def _save_flag(key: str, value) -> None:
+    _patch_config(**{key: bool(value) if isinstance(value, bool) else value})
+
+
+def save_api_keys(gemini_api_key: str) -> None:
+    _patch_config(gemini_api_key=gemini_api_key.strip())
 
 def get_gemini_key() -> str | None:
     return load_api_keys().get("gemini_api_key")
@@ -63,16 +122,10 @@ def get_user_name() -> str:
 
 def save_assistant_config(assistant_name: str, user_name: str) -> None:
     """Persist assistant name and user name to config."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["assistant_name"] = assistant_name.strip() or "JARVIS"
-    data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _patch_config(
+        assistant_name=assistant_name.strip() or "JARVIS",
+        user_name=user_name.strip(),
+    )
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -92,16 +145,8 @@ def get_voice() -> str:
 def save_voice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
     v = (voice_name or "").strip()
-    data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _patch_config(voice_name=v if v in AVAILABLE_VOICES else DEFAULT_VOICE)
 
 
 def get_wake_word_enabled() -> bool:
@@ -110,15 +155,7 @@ def get_wake_word_enabled() -> bool:
 
 
 def save_wake_word_enabled(enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _save_flag("wake_word_enabled", enabled)
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -218,18 +255,7 @@ def get_turn_tuning() -> dict:
 
 
 def save_turn_tuning(values: dict) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    cur = data.get("turn_tuning")
-    cur = dict(cur) if isinstance(cur, dict) else {}
-    cur.update(values or {})
-    data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _patch_nested("turn_tuning", values or {})
 
 
 def get_proactive_audio_enabled() -> bool:
@@ -266,33 +292,12 @@ def save_media_resolution(value: str) -> None:
     _save_flag("media_resolution", v if v in MEDIA_RESOLUTIONS else "medium")
 
 
-def _save_flag(key: str, value) -> None:
-    """Read-modify-write one key without disturbing the rest of the config."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
-
-
 def get_brief_enabled() -> bool:
     return load_api_keys().get("morning_brief_enabled", True)
 
 
 def save_brief_enabled(enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _save_flag("morning_brief_enabled", enabled)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -301,22 +306,6 @@ def save_brief_enabled(enabled: bool) -> None:
 # at a different microphone. The empty string means "system default", which is
 # both the factory setting and what an unresolvable saved device falls back to —
 # so unplugging a headset degrades to the built-in speakers instead of crashing.
-
-def _patch_config(**fields) -> None:
-    """Read-modify-write one or more keys in api_keys.json.
-
-    Every setter in this file open-coded this. Collapsing it here means a new
-    setting is one line, and there is one place where a corrupt config file is
-    handled instead of nine."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
 def get_input_device() -> str:
@@ -361,25 +350,18 @@ def get_plugin_setting(namespace: str, key: str, default=None):
 
 
 def save_plugin_config(namespace: str, values: dict) -> None:
-    """Merge `values` into a namespace's stored config (read-modify-write, like
-    every other helper here). Only the provided keys are touched."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    pc = data.get("plugin_config")
-    if not isinstance(pc, dict):
-        pc = {}
-    cur = pc.get(namespace)
-    if not isinstance(cur, dict):
-        cur = {}
-    cur.update(values)
-    pc[namespace] = cur
-    data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    """Merge `values` into a namespace's stored config, atomically and
+    under lock. Only the provided keys are touched."""
+    with _lock:
+        data = _read_unlocked()
+        pc = data.get("plugin_config")
+        pc = dict(pc) if isinstance(pc, dict) else {}
+        cur = pc.get(namespace)
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        cur.update(values)
+        pc[namespace] = cur
+        data["plugin_config"] = pc
+        _atomic_write(data)
 
 
 # ── Coding agent (core/coding_agent/) ───────────────────────────────────────
@@ -596,16 +578,10 @@ def save_claude_timeout_ms(timeout_ms: int) -> None:
 
 
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    plugins_cfg = data.get("plugins_enabled")
-    if not isinstance(plugins_cfg, dict):
-        plugins_cfg = {}
-    plugins_cfg[plugin_name] = enabled
-    data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    with _lock:
+        data = _read_unlocked()
+        plugins_cfg = data.get("plugins_enabled")
+        plugins_cfg = dict(plugins_cfg) if isinstance(plugins_cfg, dict) else {}
+        plugins_cfg[plugin_name] = enabled
+        data["plugins_enabled"] = plugins_cfg
+        _atomic_write(data)

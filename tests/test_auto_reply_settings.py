@@ -6,6 +6,8 @@ platform names are dropped rather than accepted verbatim, an empty call
 just reports status without changing anything, and the reported status
 always reflects config_manager's real (possibly monkeypatched) state.
 """
+import pytest
+
 from actions import auto_reply_settings as settings
 
 
@@ -108,3 +110,76 @@ def test_logs_to_player_when_given(monkeypatch):
     settings.configure_auto_response({"auto_reply_enabled": True}, player=player)
 
     assert logged
+
+
+# ── Strict boolean validation (item 10) ─────────────────────────────────────
+# bool("false") is True in Python - a malformed payload sending the STRING
+# "false" used to silently ENABLE a feature meant to stay off. Every
+# boolean-typed field must now be a real Python bool or the whole call is
+# rejected before anything is written.
+
+@pytest.mark.parametrize("bad_value", ["true", "false", 0, 1, None, [], {}, ["true"]])
+def test_non_bool_auto_reply_enabled_is_rejected_without_writing(monkeypatch, bad_value):
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({"auto_reply_enabled": bad_value})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_enabled"] is False   # unchanged
+
+
+@pytest.mark.parametrize("field", [
+    "auto_reply_enabled", "whatsapp_call_answer_enabled", "instagram_call_answer_enabled",
+])
+@pytest.mark.parametrize("bad_value", ["true", "false", 0, 1, None])
+def test_every_bool_field_rejects_non_bool_values(monkeypatch, field, bad_value):
+    state = _config_state(monkeypatch)
+    snapshot = dict(state)
+
+    result = settings.configure_auto_response({field: bad_value})
+
+    assert "invalid" in result.lower()
+    assert state == snapshot   # nothing was written
+
+
+def test_real_true_and_false_are_accepted(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    settings.configure_auto_response({"auto_reply_enabled": True})
+    assert state["auto_reply_enabled"] is True
+
+    settings.configure_auto_response({"auto_reply_enabled": False})
+    assert state["auto_reply_enabled"] is False
+
+
+def test_invalid_platforms_type_is_rejected_without_writing(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_platforms=["instagram"])
+
+    result = settings.configure_auto_response({"auto_reply_platforms": "whatsapp"})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_platforms"] == ["instagram"]
+
+
+def test_platforms_list_with_a_non_string_entry_is_rejected(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_platforms=["instagram"])
+
+    result = settings.configure_auto_response({"auto_reply_platforms": ["whatsapp", 123]})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_platforms"] == ["instagram"]
+
+
+def test_one_invalid_field_blocks_the_whole_call_atomically(monkeypatch):
+    """Acceptance criterion: no partial apply. A valid field alongside an
+    invalid one must change NOTHING, not just skip the bad one."""
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({
+        "auto_reply_enabled": True,           # valid
+        "whatsapp_call_answer_enabled": "false",  # invalid
+    })
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_enabled"] is False
+    assert state["whatsapp_call_answer_enabled"] is False

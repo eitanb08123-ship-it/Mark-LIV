@@ -32,6 +32,29 @@ from memory.config_manager import (
 )
 
 _VALID_PLATFORMS = ("whatsapp", "telegram", "instagram")
+_BOOL_FIELDS = ("auto_reply_enabled", "whatsapp_call_answer_enabled", "instagram_call_answer_enabled")
+
+
+def _validate_params(params: dict) -> str:
+    """Returns an error message if any PROVIDED field has an invalid
+    type, else "". Checked before any setting is written, so a malformed
+    call can never partially apply.
+
+    The reason this checks isinstance(value, bool) instead of the old
+    bool(value) cast: in Python, bool("false") is True - a payload that
+    sends the STRING "false" (a real risk from a malformed API call, not
+    a hypothetical) would have silently ENABLED a feature meant to stay
+    off. Booleans must be real Python bools now; "true"/"false"/0/1/None/
+    lists/dicts are all rejected with a clear message instead of being
+    coerced into some guessed meaning."""
+    for field in _BOOL_FIELDS:
+        if field in params and not isinstance(params[field], bool):
+            return f"Invalid value for {field}: expected true or false, got {params[field]!r}."
+    if "auto_reply_platforms" in params:
+        raw = params["auto_reply_platforms"]
+        if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+            return f"Invalid value for auto_reply_platforms: expected a list of platform names, got {raw!r}."
+    return ""
 
 
 def _current_status() -> str:
@@ -48,10 +71,15 @@ def _current_status() -> str:
 
 def configure_auto_response(parameters: dict, player=None, **_) -> str:
     params = parameters or {}
+
+    error = _validate_params(params)
+    if error:
+        return error
+
     changed = []
 
     if "auto_reply_enabled" in params:
-        enabled = bool(params["auto_reply_enabled"])
+        enabled = params["auto_reply_enabled"]
         save_auto_reply_enabled(enabled)
         changed.append(f"auto-reply to messages turned {'on' if enabled else 'off'}")
 
@@ -64,12 +92,12 @@ def configure_auto_response(parameters: dict, player=None, **_) -> str:
             changed.append(f"auto-reply platforms set to {', '.join(cleaned)}")
 
     if "whatsapp_call_answer_enabled" in params:
-        enabled = bool(params["whatsapp_call_answer_enabled"])
+        enabled = params["whatsapp_call_answer_enabled"]
         save_whatsapp_call_answer_enabled(enabled)
         changed.append(f"WhatsApp call auto-answer turned {'on' if enabled else 'off'}")
 
     if "instagram_call_answer_enabled" in params:
-        enabled = bool(params["instagram_call_answer_enabled"])
+        enabled = params["instagram_call_answer_enabled"]
         save_instagram_auto_answer_enabled(enabled)
         changed.append(f"Instagram call auto-answer turned {'on' if enabled else 'off'}")
 
