@@ -79,6 +79,81 @@ def test_missing_pywinauto_is_reported(monkeypatch):
     assert any("pywinauto" in r.lower() for r in result)
 
 
+# ── _focus_and_maximize (bring the app to the foreground once, on activation) ─
+
+class _FakeFocusWindow:
+    def __init__(self, minimized=False, raise_on=None):
+        self.minimized = minimized
+        self.restored = False
+        self.focused = False
+        self.maximized = False
+        self._raise_on = raise_on or ()
+
+    def is_minimized(self):
+        return self.minimized
+
+    def restore(self):
+        if "restore" in self._raise_on:
+            raise RuntimeError("restore failed")
+        self.restored = True
+        self.minimized = False
+
+    def set_focus(self):
+        if "set_focus" in self._raise_on:
+            raise RuntimeError("set_focus failed")
+        self.focused = True
+
+    def maximize(self):
+        if "maximize" in self._raise_on:
+            raise RuntimeError("maximize failed")
+        self.maximized = True
+
+
+def test_focus_and_maximize_missing_pywinauto_is_reported(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", False)
+
+    result = auto_reply._focus_and_maximize("WhatsApp")
+
+    assert "pywinauto" in result.lower()
+
+
+def test_focus_and_maximize_restores_focuses_and_maximizes(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    win = _FakeFocusWindow(minimized=True)
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: win)
+
+    result = auto_reply._focus_and_maximize("WhatsApp")
+
+    assert win.restored is True
+    assert win.focused is True
+    assert win.maximized is True
+    assert "focused and maximized" in result.lower()
+
+
+def test_focus_and_maximize_skips_restore_when_not_minimized(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    win = _FakeFocusWindow(minimized=False)
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: win)
+
+    auto_reply._focus_and_maximize("WhatsApp")
+
+    assert win.restored is False
+    assert win.focused is True
+    assert win.maximized is True
+
+
+def test_focus_and_maximize_reports_failure_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+
+    def _boom(app_name):
+        raise RuntimeError("window not found")
+    monkeypatch.setattr(auto_reply, "_connect", _boom)
+
+    result = auto_reply._focus_and_maximize("WhatsApp")
+
+    assert "could not focus/maximize" in result.lower()
+
+
 def test_no_unread_chats_means_no_replies(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
     monkeypatch.setattr(auto_reply, "_PYAUTOGUI", True)

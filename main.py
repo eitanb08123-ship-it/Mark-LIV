@@ -1993,10 +1993,17 @@ class JarvisLive:
         WhatsApp AND Instagram at once) for unread messages and replies
         immediately with an AI-generated response, with no human review.
         That is an explicit, informed choice made after the risk was
-        raised, not an oversight. Same idle-time guard as
-        _run_call_checkin and for the same reason: the WhatsApp/Telegram
-        path drives the real keyboard/mouse (the Instagram path does not,
-        but the guard is cheap and applies to the whole cycle either way).
+        raised, not an oversight.
+
+        UNLIKE _run_call_checkin/_run_whatsapp_call_answer, this loop has
+        NO idle-time guard - a second explicit, informed choice: the user
+        was told plainly that the WhatsApp/Telegram path drives the real
+        keyboard/mouse (pyautogui), so this WILL click/type into WhatsApp
+        and can visibly steal focus/the cursor even while the user is
+        actively typing in another window, at any hour, until auto-reply
+        is explicitly turned off (configure_auto_response with
+        auto_reply_enabled=False) - the user chose immediate, continuous
+        24/7 replies over that safety margin.
 
         auto_reply_cycle() itself is built to never raise (every per-chat
         failure comes back as a result string, already logged below) - an
@@ -2024,11 +2031,6 @@ class JarvisLive:
             if not enabled:
                 consecutive_failures = 0
                 alerted = False
-                continue
-
-            idle = windows_idle_seconds()
-            if idle is not None and idle < 15:
-                self.ui.write_log(f"[AutoReply] skipped this tick - system idle only {idle:.0f}s (needs 15s+)")
                 continue
 
             self.ui.write_log("[AutoReply] checking configured platform(s) for new messages...")

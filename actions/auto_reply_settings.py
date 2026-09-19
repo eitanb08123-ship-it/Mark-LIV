@@ -20,6 +20,7 @@ picks up the new flag value.
 """
 from __future__ import annotations
 
+from actions.auto_reply import _focus_and_maximize
 from memory.config_manager import (
     get_auto_reply_enabled,
     get_auto_reply_platforms,
@@ -33,6 +34,11 @@ from memory.config_manager import (
 
 _VALID_PLATFORMS = ("whatsapp", "telegram", "instagram")
 _BOOL_FIELDS = ("auto_reply_enabled", "whatsapp_call_answer_enabled", "instagram_call_answer_enabled")
+
+# Instagram is browser-based (no desktop window to bring to the foreground
+# the same way - see actions/instagram_call_answer.py's own docstring on
+# why it deliberately never touches the user's real focus at all).
+_DESKTOP_APP_PLATFORMS = ("whatsapp", "telegram")
 
 
 def _validate_params(params: dict) -> str:
@@ -105,6 +111,21 @@ def configure_auto_response(parameters: dict, player=None, **_) -> str:
         enabled = params["instagram_call_answer_enabled"]
         save_instagram_auto_answer_enabled(enabled)
         changed.append(f"Instagram call auto-answer turned {'on' if enabled else 'off'}")
+
+    # Bring each currently-configured desktop-app platform's window to the
+    # foreground and maximize it ONCE, right when this call activates
+    # auto-reply - so Watch Mode's chat list is actually visible on screen.
+    # Uses the final platform list (after the block above), so this fires
+    # correctly whether platforms were passed in this same call or were
+    # already configured from an earlier one.
+    if params.get("auto_reply_enabled") is True:
+        for platform in get_auto_reply_platforms():
+            if platform in _DESKTOP_APP_PLATFORMS:
+                focus_result = _focus_and_maximize(platform.title())
+                changed.append(focus_result)
+                print(f"[AutoReply] {focus_result}")
+                if player:
+                    player.write_log(f"[AutoReply] {focus_result}")
 
     status = _current_status()
     if player:

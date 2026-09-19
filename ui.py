@@ -67,7 +67,7 @@ APP_PROTOCOL = APP_VERSION.split()[-1]
 # APP_VERSION in the header so a restart makes it visible at a glance
 # whether newly-downloaded code actually loaded, instead of grepping files
 # by hand to check.
-APP_BUILD = "b6"
+APP_BUILD = "b7"
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580

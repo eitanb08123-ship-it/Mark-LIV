@@ -64,6 +64,59 @@ def test_enables_auto_reply_and_sets_platforms(monkeypatch):
     assert "turned on" in result
 
 
+# ── focus/maximize on activation ────────────────────────────────────────────
+
+def test_activating_auto_reply_focuses_and_maximizes_each_desktop_platform(monkeypatch):
+    state = _config_state(monkeypatch)
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or f"{app_name} window focused and maximized.")
+
+    result = settings.configure_auto_response({
+        "auto_reply_enabled": True,
+        "auto_reply_platforms": ["whatsapp", "telegram", "instagram"],
+    })
+
+    assert calls == ["Whatsapp", "Telegram"]   # instagram is browser-based, not a desktop window
+    assert "focused and maximized" in result.lower()
+
+
+def test_activating_auto_reply_with_already_configured_platforms_still_focuses(monkeypatch):
+    """Focus must fire using the FINAL platform list even when platforms
+    weren't part of THIS call - e.g. auto_reply_platforms was set to
+    ["whatsapp"] earlier, and this call only flips auto_reply_enabled."""
+    state = _config_state(monkeypatch, auto_reply_platforms=["whatsapp"])
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_enabled": True})
+
+    assert calls == ["Whatsapp"]
+
+
+def test_disabling_auto_reply_does_not_focus_anything(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_enabled=True, auto_reply_platforms=["whatsapp"])
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_enabled": False})
+
+    assert calls == []
+
+
+def test_status_only_call_does_not_focus_anything(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_enabled=True, auto_reply_platforms=["whatsapp"])
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({})
+
+    assert calls == []
+
+
 def test_invalid_platform_names_are_dropped(monkeypatch):
     state = _config_state(monkeypatch, auto_reply_platforms=["instagram"])
 

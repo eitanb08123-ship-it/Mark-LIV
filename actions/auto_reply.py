@@ -103,6 +103,33 @@ def _connect(app_name: str, timeout: float = 5.0):
     return app.top_window()
 
 
+def _focus_and_maximize(app_name: str) -> str:
+    """Brings app_name's window to the foreground and maximizes it, ONCE,
+    when Watch Mode is first turned on (see configure_auto_response()) - so
+    the chat list/message view is actually visible on screen rather than
+    running invisibly in the background. This does NOT run on every poll:
+    the actual detection (_find_unread_chats()) reads the window's UI
+    Automation tree directly and doesn't need real OS focus to do that, and
+    _reply_to_chat() already re-establishes focus for itself right before
+    typing (_ensure_foreground()) regardless of whatever the user is doing
+    at that moment - repeatedly forcing focus here on every cycle would
+    fight the user for their own window instead. Best-effort and never
+    raises - a failure here does not prevent detection/replying from still
+    working against a background/minimized window, this is purely for
+    visibility."""
+    if not _PYWINAUTO:
+        return f"Could not bring {app_name} to the foreground: pywinauto is not installed."
+    try:
+        win = _connect(app_name)
+        if win.is_minimized():
+            win.restore()
+        win.set_focus()
+        win.maximize()
+        return f"{app_name} window focused and maximized."
+    except Exception as e:
+        return f"Could not focus/maximize {app_name}: {e}"
+
+
 _PRIVACY_NOTE = (
     "\n\n[PRIVACY NOTE: this dump can include real, visible chat content "
     "(sender names, message text) from the window's accessibility tree, "
