@@ -1071,18 +1071,22 @@ def browser_control(
     if action in ("go_to", "search", "new_tab"):
         if _registry.has(browser):
             sess = _registry.get(browser)
-            try:
-                if action == "search":
-                    result = sess.run(sess.search(params.get("query", ""),
-                                                  params.get("engine", "google")))
-                elif action == "new_tab":
-                    result = sess.run(sess.new_tab(params.get("url", "")))
-                else:
-                    result = sess.run(sess.go_to(params.get("url", "")))
-            except concurrent.futures.TimeoutError:
-                result = f"Browser action '{action}' timed out (60s)."
-            except Exception as e:
-                result = f"Browser error ({action}): {e}"
+            # Blocks/waits rather than interleaving if an Instagram
+            # auto-reply/call-answer workflow (or another browser_control
+            # call) currently holds the same session's lock.
+            with sess.exclusive():
+                try:
+                    if action == "search":
+                        result = sess.run(sess.search(params.get("query", ""),
+                                                      params.get("engine", "google")))
+                    elif action == "new_tab":
+                        result = sess.run(sess.new_tab(params.get("url", "")))
+                    else:
+                        result = sess.run(sess.go_to(params.get("url", "")))
+                except concurrent.futures.TimeoutError:
+                    result = f"Browser action '{action}' timed out (60s)."
+                except Exception as e:
+                    result = f"Browser error ({action}): {e}"
             _log(player, result)
             return result
 
@@ -1110,50 +1114,55 @@ def browser_control(
         _log(player, result)
         return result
 
-    try:
-        last = _registry.pop_native_url()
-        if last:
-            try:
-                sess.run(sess.go_to(last))
-            except Exception as e:
-                print(f"[Browser] Could not resume last page ({last}): {e}")
+    # Same lock as above: any general-purpose browser_control call here
+    # blocks/waits if an Instagram auto-reply/call-answer workflow (or
+    # another browser_control call) currently holds it, rather than
+    # interleaving mid-sequence with it.
+    with sess.exclusive():
+        try:
+            last = _registry.pop_native_url()
+            if last:
+                try:
+                    sess.run(sess.go_to(last))
+                except Exception as e:
+                    print(f"[Browser] Could not resume last page ({last}): {e}")
 
-        if action == "click":
-            result = sess.run(sess.click(params.get("selector"), params.get("text")))
-        elif action == "type":
-            result = sess.run(sess.type_text(
-                params.get("selector"), params.get("text", ""), params.get("clear_first", True)))
-        elif action == "scroll":
-            result = sess.run(sess.scroll(params.get("direction", "down"), int(params.get("amount", 500))))
-        elif action == "fill_form":
-            result = sess.run(sess.fill_form(params.get("fields", {})))
-        elif action == "smart_click":
-            result = sess.run(sess.smart_click(params.get("description", "")))
-        elif action == "smart_type":
-            result = sess.run(sess.smart_type(params.get("description", ""), params.get("text", "")))
-        elif action == "get_text":
-            result = sess.run(sess.get_text())
-        elif action == "get_url":
-            result = sess.run(sess.get_url())
-        elif action == "press":
-            result = sess.run(sess.press(params.get("key", "Enter")))
-        elif action == "close_tab":
-            result = sess.run(sess.close_tab())
-        elif action == "screenshot":
-            result = sess.run(sess.screenshot(params.get("path")))
-        elif action == "back":
-            result = sess.run(sess.back())
-        elif action == "forward":
-            result = sess.run(sess.forward())
-        elif action == "reload":
-            result = sess.run(sess.reload())
-        else:
-            result = f"Unknown browser action: '{action}'"
+            if action == "click":
+                result = sess.run(sess.click(params.get("selector"), params.get("text")))
+            elif action == "type":
+                result = sess.run(sess.type_text(
+                    params.get("selector"), params.get("text", ""), params.get("clear_first", True)))
+            elif action == "scroll":
+                result = sess.run(sess.scroll(params.get("direction", "down"), int(params.get("amount", 500))))
+            elif action == "fill_form":
+                result = sess.run(sess.fill_form(params.get("fields", {})))
+            elif action == "smart_click":
+                result = sess.run(sess.smart_click(params.get("description", "")))
+            elif action == "smart_type":
+                result = sess.run(sess.smart_type(params.get("description", ""), params.get("text", "")))
+            elif action == "get_text":
+                result = sess.run(sess.get_text())
+            elif action == "get_url":
+                result = sess.run(sess.get_url())
+            elif action == "press":
+                result = sess.run(sess.press(params.get("key", "Enter")))
+            elif action == "close_tab":
+                result = sess.run(sess.close_tab())
+            elif action == "screenshot":
+                result = sess.run(sess.screenshot(params.get("path")))
+            elif action == "back":
+                result = sess.run(sess.back())
+            elif action == "forward":
+                result = sess.run(sess.forward())
+            elif action == "reload":
+                result = sess.run(sess.reload())
+            else:
+                result = f"Unknown browser action: '{action}'"
 
-    except concurrent.futures.TimeoutError:
-        result = f"Browser action '{action}' timed out (60s)."
-    except Exception as e:
-        result = f"Browser error ({action}): {e}"
+        except concurrent.futures.TimeoutError:
+            result = f"Browser action '{action}' timed out (60s)."
+        except Exception as e:
+            result = f"Browser error ({action}): {e}"
 
     _log(player, result)
     return result
