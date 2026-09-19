@@ -22,11 +22,13 @@ from __future__ import annotations
 
 from actions.auto_reply import _focus_and_maximize
 from memory.config_manager import (
+    get_auto_reply_contacts,
     get_auto_reply_dry_run,
     get_auto_reply_enabled,
     get_auto_reply_platforms,
     get_instagram_auto_answer_enabled,
     get_whatsapp_call_answer_enabled,
+    save_auto_reply_contacts,
     save_auto_reply_dry_run,
     save_auto_reply_enabled,
     save_auto_reply_platforms,
@@ -65,17 +67,23 @@ def _validate_params(params: dict) -> str:
         raw = params["auto_reply_platforms"]
         if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
             return f"Invalid value for auto_reply_platforms: expected a list of platform names, got {raw!r}."
+    if "auto_reply_contacts" in params:
+        raw = params["auto_reply_contacts"]
+        if not isinstance(raw, list) or not all(isinstance(c, str) for c in raw):
+            return f"Invalid value for auto_reply_contacts: expected a list of contact names, got {raw!r}."
     return ""
 
 
 def _current_status() -> str:
     reply_state = "on" if get_auto_reply_enabled() else "off"
     reply_platforms = ", ".join(get_auto_reply_platforms())
+    contacts = get_auto_reply_contacts()
+    contacts_state = ", ".join(contacts) if contacts else "all"
     wa_calls = "on" if get_whatsapp_call_answer_enabled() else "off"
     ig_calls = "on" if get_instagram_auto_answer_enabled() else "off"
     dry_run = "on (nothing is actually sent - would-be replies are only logged)" if get_auto_reply_dry_run() else "off"
     return (
-        f"Auto-reply to messages: {reply_state} (platforms: {reply_platforms}). "
+        f"Auto-reply to messages: {reply_state} (platforms: {reply_platforms}; contacts: {contacts_state}). "
         f"Auto-answer WhatsApp calls: {wa_calls}. "
         f"Auto-answer Instagram calls: {ig_calls}. "
         f"Dry-run mode: {dry_run}."
@@ -124,6 +132,14 @@ def configure_auto_response(parameters: dict, player=None, **_) -> str:
         save_auto_reply_dry_run(enabled)
         changed.append(f"auto-reply dry-run mode turned {'on' if enabled else 'off'}")
 
+    if "auto_reply_contacts" in params:
+        cleaned = [str(c).strip() for c in params["auto_reply_contacts"] if str(c).strip()]
+        save_auto_reply_contacts(cleaned)
+        if cleaned:
+            changed.append(f"auto-reply contact allow-list set to {', '.join(cleaned)}")
+        else:
+            changed.append("auto-reply contact allow-list cleared (now replies to all contacts)")
+
     # Bring each currently-configured desktop-app platform's window to the
     # foreground and maximize it ONCE, right when this call activates
     # auto-reply - so Watch Mode's chat list is actually visible on screen.
@@ -160,7 +176,15 @@ TOOL = {
         "those settings currently are. Passing no parameters just reports "
         "the current status without changing anything. These features send "
         "AI-written replies and accept calls immediately with NO human "
-        "review, so only enable what the user actually asked for."
+        "review, so only enable what the user actually asked for. "
+        "IMPORTANT: auto_reply_platforms defaults to ['instagram'] ONLY - "
+        "turning auto_reply_enabled on WITHOUT also passing "
+        "auto_reply_platforms will silently NOT watch WhatsApp or Telegram "
+        "even if the user's whole request was about one of those. Whenever "
+        "the user names a specific app ('answer my WhatsApp messages', "
+        "'auto-reply on Telegram'), always pass auto_reply_platforms "
+        "explicitly with that app included, even if platforms were set "
+        "before - do not assume a prior setting is still what the user wants."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -193,6 +217,20 @@ TOOL = {
                     "detects messages and generates replies, but never actually sends them (just "
                     "logs what it would have sent). Use this when the user wants to test/calibrate "
                     "auto-reply before trusting it to really send messages."
+                ),
+            },
+            "auto_reply_contacts": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": (
+                    "Restrict auto-reply to ONLY these contacts (exact name match, "
+                    "case-insensitive) - e.g. ['Mom'] means auto-reply only fires for "
+                    "messages from Mom; everyone else on the watched platform(s) is "
+                    "skipped. Pass an empty list to remove the restriction and go back "
+                    "to replying to everyone (the default). Use this when the user asks "
+                    "to scope auto-reply to one or a few specific people, e.g. "
+                    "'only auto-reply to Mom'. Only takes effect while auto_reply_enabled "
+                    "is (or already was) true."
                 ),
             },
         },

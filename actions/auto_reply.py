@@ -67,7 +67,12 @@ import time
 from core import gemini
 from actions.send_message import _PYAUTOGUI, _ensure_foreground, _open_app, _paste_text, _search_in_app
 from memory import conversation_history
-from memory.config_manager import get_auto_reply_dry_run, get_auto_reply_enabled, get_auto_reply_platforms
+from memory.config_manager import (
+    get_auto_reply_contacts,
+    get_auto_reply_dry_run,
+    get_auto_reply_enabled,
+    get_auto_reply_platforms,
+)
 
 try:
     import pyautogui
@@ -340,10 +345,25 @@ def _split_row(row_text: str) -> tuple[str, str | None]:
     return contact, rest
 
 
+def _contact_allowed(contact: str) -> bool:
+    """True when auto-reply should proceed for this contact - either no
+    allow-list is configured (empty/None means "everyone", today's
+    unchanged default), or `contact` matches an entry on it exactly,
+    case-insensitively. Deliberately no fuzzy matching: a wrong fuzzy match
+    here means auto-replying to someone the user didn't intend to."""
+    allow_list = get_auto_reply_contacts()
+    if not allow_list:
+        return True
+    contact_lower = contact.strip().lower()
+    return any(contact_lower == c.strip().lower() for c in allow_list)
+
+
 def _reply_to_instagram_row(session, row: dict) -> str:
     contact = row.get("contact", "")
     if not contact:
         return "Could not determine who to reply to from an inbox row."
+    if not _contact_allowed(contact):
+        return f"{contact} is not on the auto-reply allow-list - skipping."
     thread_id = row.get("thread_id")
     incoming_text = row.get("incoming_text")
 
@@ -484,6 +504,8 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     contact, incoming_text = _split_row(chat_row_text)
     if not contact:
         return "Could not determine who to reply to from the chat row's text."
+    if not _contact_allowed(contact):
+        return f"{contact} is not on the auto-reply allow-list - skipping."
     if incoming_text is None:
         return (
             f"Could not confidently extract {contact}'s actual message from the "
@@ -589,6 +611,14 @@ def auto_reply_cycle(platforms: list[str] | str | None = None) -> list[str]:
         platform_list = [platforms]
     else:
         platform_list = list(platforms)
+
+    # DIAGNOSTIC: the exact gap that made a real "WhatsApp was silently never
+    # checked" incident hard to diagnose - get_auto_reply_platforms()
+    # defaults to ["instagram"] unless "whatsapp"/"telegram" were EXPLICITLY
+    # set at some point, so enabling auto-reply in general does not imply
+    # WhatsApp is being watched. Every cycle now says plainly which
+    # platform(s) it is actually about to check.
+    print(f"[AutoReply] cycle starting for platform(s): {platform_list}")
 
     results = []
     for platform in platform_list:

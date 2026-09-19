@@ -47,6 +47,14 @@ def _default_foreground_ok(monkeypatch):
     monkeypatch.setattr(auto_reply, "_ensure_foreground", lambda app_name: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_contact_allow_list(monkeypatch):
+    """By default, no allow-list is configured (replies to everyone) - the
+    documented default - so existing tests aren't affected. Tests
+    exercising the allow-list itself override this."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: [])
+
+
 def test_disabled_by_default_returns_empty_without_touching_anything(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: False)
     called = {"yes": False}
@@ -334,6 +342,84 @@ def test_reply_to_chat_skips_when_message_could_not_be_isolated(monkeypatch):
 
     assert called["opened"] is False
     assert "skipping rather than guessing" in result.lower()
+
+
+# ── _contact_allowed / per-contact allow-list ───────────────────────────────
+
+def test_contact_allowed_true_when_no_allow_list_is_configured(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: [])
+    assert auto_reply._contact_allowed("Dana") is True
+
+
+@pytest.mark.parametrize("allow_list,contact,expected", [
+    (["Mom"], "Mom", True),
+    (["Mom"], "mom", True),          # case-insensitive
+    (["mom"], "Mom", True),          # case-insensitive the other way
+    (["Mom"], "Dana", False),        # not on the list
+    (["Mom", "Dana"], "Dana", True),
+    ([], "Dana", True),              # empty list = everyone allowed
+    (["Mom"], "Mommy", False),       # no fuzzy matching, deliberately
+    (["Mom"], "Mo", False),
+])
+def test_contact_allowed_matching(monkeypatch, allow_list, contact, expected):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: allow_list)
+    assert auto_reply._contact_allowed(contact) is expected
+
+
+def test_reply_to_chat_skips_a_contact_not_on_the_allow_list(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: ["Mom"])
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+    called_open = {"opened": False}
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called_open.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert called["generated"] is False    # never even asked Gemini for a reply
+    assert called_open["opened"] is False
+    assert "not on the auto-reply allow-list" in result.lower()
+
+
+def test_reply_to_chat_replies_to_a_contact_on_the_allow_list(monkeypatch, _no_real_conversation_history):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: ["Mom", "Dana"])
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text", lambda win: "Sure, on it!")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert result.startswith("Replied")
+
+
+def test_reply_to_instagram_row_skips_a_contact_not_on_the_allow_list(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: ["Mom"])
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": "you around?", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert called["generated"] is False
+    assert fake.clicked == []
+    assert "not on the auto-reply allow-list" in result.lower()
+
+
+def test_reply_to_instagram_row_replies_to_a_contact_on_the_allow_list(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: ["mom"])   # different casing
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
+    fake = _FakeBrowserSession()
+    row = {"contact": "Mom", "incoming_text": "you around?", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert result.startswith("Replied")
 
 
 # ── post-send verification (item 4: confirm it actually landed) ────────────

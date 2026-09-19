@@ -121,3 +121,32 @@ def test_auto_reply_dry_run_round_trips():
     assert cm.get_auto_reply_dry_run() is True
     cm.save_auto_reply_dry_run(False)
     assert cm.get_auto_reply_dry_run() is False
+
+
+def test_auto_reply_contacts_empty_by_default():
+    assert cm.get_auto_reply_contacts() == []
+
+
+def test_auto_reply_contacts_round_trips():
+    cm.save_auto_reply_contacts(["Mom", "Dana"])
+    assert cm.get_auto_reply_contacts() == ["Mom", "Dana"]
+
+
+def test_auto_reply_contacts_strips_blank_entries():
+    cm.save_auto_reply_contacts(["Mom", "  ", "", "Dana"])
+    assert cm.get_auto_reply_contacts() == ["Mom", "Dana"]
+
+
+def test_auto_reply_contacts_can_be_cleared_back_to_empty():
+    cm.save_auto_reply_contacts(["Mom"])
+    assert cm.get_auto_reply_contacts() == ["Mom"]
+    cm.save_auto_reply_contacts([])
+    assert cm.get_auto_reply_contacts() == []
+
+
+def test_auto_reply_contacts_preserves_original_casing():
+    """Storage keeps display casing as given - matching is
+    case-insensitive at check time (actions/auto_reply.py's
+    _contact_allowed()), not by lowercasing on save."""
+    cm.save_auto_reply_contacts(["MoM"])
+    assert cm.get_auto_reply_contacts() == ["MoM"]

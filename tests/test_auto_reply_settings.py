@@ -18,6 +18,7 @@ def _config_state(monkeypatch, **overrides):
         "whatsapp_call_answer_enabled": False,
         "instagram_auto_answer_enabled": False,
         "auto_reply_dry_run": False,
+        "auto_reply_contacts": [],
     }
     state.update(overrides)
 
@@ -26,6 +27,7 @@ def _config_state(monkeypatch, **overrides):
     monkeypatch.setattr(settings, "get_whatsapp_call_answer_enabled", lambda: state["whatsapp_call_answer_enabled"])
     monkeypatch.setattr(settings, "get_instagram_auto_answer_enabled", lambda: state["instagram_auto_answer_enabled"])
     monkeypatch.setattr(settings, "get_auto_reply_dry_run", lambda: state["auto_reply_dry_run"])
+    monkeypatch.setattr(settings, "get_auto_reply_contacts", lambda: state["auto_reply_contacts"])
 
     monkeypatch.setattr(settings, "save_auto_reply_enabled",
                          lambda v: state.__setitem__("auto_reply_enabled", v))
@@ -37,6 +39,8 @@ def _config_state(monkeypatch, **overrides):
                          lambda v: state.__setitem__("instagram_auto_answer_enabled", v))
     monkeypatch.setattr(settings, "save_auto_reply_dry_run",
                          lambda v: state.__setitem__("auto_reply_dry_run", v))
+    monkeypatch.setattr(settings, "save_auto_reply_contacts",
+                         lambda v: state.__setitem__("auto_reply_contacts", v))
     return state
 
 
@@ -53,6 +57,7 @@ def test_no_parameters_only_reports_status_and_changes_nothing(monkeypatch):
         "whatsapp_call_answer_enabled": False,
         "instagram_auto_answer_enabled": False,
         "auto_reply_dry_run": False,
+        "auto_reply_contacts": [],
     }
 
 
@@ -273,5 +278,80 @@ def test_enabling_dry_run_alone_does_not_focus_anything(monkeypatch):
                         lambda app_name: calls.append(app_name) or "ok")
 
     settings.configure_auto_response({"auto_reply_dry_run": True})
+
+    assert calls == []
+
+
+# ── per-contact allow-list ───────────────────────────────────────────────────
+
+def test_sets_the_contact_allow_list(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({"auto_reply_contacts": ["Mom"]})
+
+    assert state["auto_reply_contacts"] == ["Mom"]
+    assert "allow-list set to mom" in result.lower()
+
+
+def test_clearing_the_contact_allow_list_is_reported_distinctly(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_contacts": []})
+
+    assert state["auto_reply_contacts"] == []
+    assert "cleared" in result.lower()
+    assert "all contacts" in result.lower()
+
+
+def test_contact_allow_list_strips_blank_entries(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    settings.configure_auto_response({"auto_reply_contacts": ["Mom", "  ", ""]})
+
+    assert state["auto_reply_contacts"] == ["Mom"]
+
+
+def test_status_reports_the_allow_list(monkeypatch):
+    _config_state(monkeypatch, auto_reply_enabled=True, auto_reply_platforms=["whatsapp"],
+                   auto_reply_contacts=["Mom"])
+
+    result = settings.configure_auto_response({})
+
+    assert "contacts: mom" in result.lower()
+
+
+def test_status_reports_all_when_no_allow_list_is_set(monkeypatch):
+    _config_state(monkeypatch, auto_reply_enabled=True, auto_reply_platforms=["whatsapp"])
+
+    result = settings.configure_auto_response({})
+
+    assert "contacts: all" in result.lower()
+
+
+def test_invalid_contacts_type_is_rejected_without_writing(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_contacts": "Mom"})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_contacts"] == ["Mom"]
+
+
+def test_contacts_list_with_a_non_string_entry_is_rejected(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_contacts": ["Dana", 123]})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_contacts"] == ["Mom"]
+
+
+def test_setting_contacts_alone_does_not_focus_anything(monkeypatch):
+    state = _config_state(monkeypatch)
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_contacts": ["Mom"]})
 
     assert calls == []

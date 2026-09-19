@@ -488,6 +488,25 @@ def save_auto_reply_platforms(platforms: list[str]) -> None:
     _patch_config(auto_reply_platforms=cleaned or ["instagram"])
 
 
+def get_auto_reply_contacts() -> list[str]:
+    """The auto-reply allow-list: an empty list (the default) means "every
+    contact on the watched platform(s)" - today's behavior, unchanged. A
+    non-empty list means ONLY these contacts get auto-replied to; everyone
+    else is skipped before any reply is generated or sent. Stored exactly
+    as given (not lowercased) so the display name in save_auto_reply_
+    contacts()'s caller round-trips - actions/auto_reply.py's own matching
+    does the case-insensitive comparison at check time."""
+    raw = load_api_keys().get("auto_reply_contacts")
+    if isinstance(raw, list):
+        return [str(c).strip() for c in raw if str(c).strip()]
+    return []
+
+
+def save_auto_reply_contacts(contacts: list[str]) -> None:
+    cleaned = [str(c).strip() for c in (contacts or []) if str(c).strip()]
+    _patch_config(auto_reply_contacts=cleaned)
+
+
 def get_auto_reply_dry_run() -> bool:
     """Shadow mode: runs the full detect -> generate pipeline but never
     actually clicks/types/sends anything and never accepts a call - the
