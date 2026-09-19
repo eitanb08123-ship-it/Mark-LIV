@@ -44,6 +44,19 @@ def test_no_owner_configured_refuses_without_touching_the_desktop(monkeypatch):
     assert called["yes"] is False
 
 
+def test_desktop_call_aborts_when_focus_is_confirmed_absent(monkeypatch, working_desktop):
+    """Item 3: launch_app()/_open_app() only guarantees the process
+    exists, not that the correct window has focus."""
+    opened, searched = working_desktop
+    monkeypatch.setattr(call_contact, "get_owner_contact_name", lambda: "Eitan")
+    monkeypatch.setattr(call_contact, "_ensure_foreground", lambda app_name: False)
+
+    result = call_contact.call_contact({"platform": "whatsapp"})
+
+    assert searched == {}
+    assert "focus" in result.lower()
+
+
 def test_always_calls_the_configured_owner_contact(monkeypatch, working_desktop):
     opened, searched = working_desktop
     monkeypatch.setattr(call_contact, "get_owner_contact_name", lambda: "Eitan")

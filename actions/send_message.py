@@ -28,6 +28,13 @@ except ImportError:
     _PYWINAUTO = False
     Application = None
 
+try:
+    import win32gui
+    _WIN32GUI = True
+except ImportError:
+    _WIN32GUI = False
+    win32gui = None
+
 _WINDOW_TITLE_PATTERNS = {
     "whatsapp": "WhatsApp",
     "telegram": "Telegram",
@@ -92,6 +99,38 @@ def _open_app(app_name: str) -> bool:
     when the app never actually opened, e.g. because the wrong window had
     focus). One verified launcher now, not two copies that can drift."""
     return _launch_app(app_name)
+
+
+def _ensure_foreground(app_name: str) -> bool | None:
+    """Separates "the process exists" (launch_app()'s guarantee) from "the
+    correct window is focused and ready for keyboard input" - a real
+    safety gap: WhatsApp already running in the background, the user
+    actively in a browser/editor/terminal, launch_app() correctly
+    returning True because the process exists, and every subsequent
+    keystroke landing in whatever window actually had focus instead.
+
+    Connects to app_name's window, calls set_focus(), then confirms via
+    win32gui.GetForegroundWindow() that it actually became the foreground
+    window - set_focus() can fail silently under Windows' focus-stealing
+    prevention, so the request alone isn't proof.
+
+    Returns True (confirmed focused), False (confirmed NOT the foreground
+    window - caller must cancel rather than send keystrokes blind), or
+    None when this can't be checked at all (pywinauto/pywin32 missing, or
+    the check itself errored) - callers treat None as "proceed with the
+    old best-effort behavior", since there is nothing better to fall back
+    to when the dependency for verifying at all isn't there."""
+    if not _PYWINAUTO or not _WIN32GUI:
+        return None
+    pattern = _WINDOW_TITLE_PATTERNS.get(app_name.lower(), app_name)
+    try:
+        win = Application(backend="uia").connect(title_re=f".*{pattern}.*", timeout=5.0).top_window()
+        win.set_focus()
+        time.sleep(0.2)
+        return win32gui.GetForegroundWindow() == win.handle
+    except Exception as e:
+        print(f"[SendMessage] ⚠️ Could not confirm {app_name} has focus: {e}")
+        return None
 
 
 def _open_browser_url(url: str) -> bool:
@@ -171,6 +210,12 @@ def _search_in_app(query: str, app_name: str = "") -> None:
 def _desktop_send(app_name: str, receiver: str, message: str) -> str:
     if not _open_app(app_name):
         return f"Could not open {app_name}."
+
+    if _ensure_foreground(app_name) is False:
+        return (
+            f"Could not confirm {app_name} has keyboard focus - not sending, to avoid "
+            f"typing into whatever window actually had focus."
+        )
 
     time.sleep(1.0)
     _search_in_app(receiver, app_name)

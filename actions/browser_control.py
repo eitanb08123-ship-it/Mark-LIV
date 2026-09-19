@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import os
 import platform
 import shutil
@@ -459,6 +460,27 @@ class _BrowserSession:
         self._context: BrowserContext | None = None
         self._page:    Page           | None = None
 
+        # Serializes multi-step workflows that share this one page/tab -
+        # e.g. Instagram auto-reply's find-contact -> click -> type ->
+        # send -> verify sequence and the incoming-call check -> accept
+        # sequence used to be able to interleave (both just called
+        # smart_click()/get_text() independently), so one workflow could
+        # end up clicking into or typing over whatever the OTHER one had
+        # just navigated to. Acquired for the FULL sequence via
+        # exclusive(), not per individual action - any other caller of
+        # this session (including a plain, user-requested browser_control
+        # command) blocks on the same lock rather than being cancelled or
+        # routed to a separate tab.
+        self._workflow_lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def exclusive(self):
+        """`with session.exclusive():` around a whole multi-step workflow.
+        See the _workflow_lock comment in __init__ for why this exists and
+        what "the whole sequence" means here."""
+        with self._workflow_lock:
+            yield
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -782,6 +804,90 @@ class _BrowserSession:
             except Exception:
                 continue
         return f"Could not find input: '{description}'"
+
+    async def query_rows(
+        self, selector: str, text_selector: str = '[dir="auto"]', limit: int = 30,
+    ) -> list[dict]:
+        """For each element matching `selector` (e.g. Instagram DM row
+        anchors - `a[href*="/direct/t/"]`, which carry a stable per-
+        conversation URL get_text() can't give you), returns
+        {"href": <the element's href, or None>, "texts": [...]} where
+        `texts` are that ONE row's own `text_selector`-matching descendant
+        text nodes, in DOM order. `dir="auto"` is Meta's own common
+        pattern (WhatsApp Web and Instagram both use it) for wrapping a
+        contact name and a message preview as SEPARATE text nodes within
+        one row - this is what lets a caller tell "the real message" apart
+        from "the contact's name" structurally, instead of guessing which
+        line of a flattened get_text() blob is which. Still an informed
+        guess, not a verified selector - see callers' own honesty notes.
+        Never raises; [] on any failure."""
+        page = await self._get_page()
+        try:
+            rows = page.locator(selector)
+            count = min(await rows.count(), limit)
+        except Exception as e:
+            print(f"[BrowserControl] query_rows('{selector}') failed: {e}")
+            return []
+
+        out = []
+        for i in range(count):
+            row = rows.nth(i)
+            try:
+                href = await row.get_attribute("href")
+            except Exception:
+                href = None
+            texts = []
+            try:
+                text_nodes = row.locator(text_selector)
+                tcount = await text_nodes.count()
+                for j in range(tcount):
+                    t = (await text_nodes.nth(j).inner_text()).strip()
+                    if t:
+                        texts.append(t)
+            except Exception:
+                pass
+            out.append({"href": href, "texts": texts})
+        return out
+
+    async def click_within_role(self, container_role: str, label: str) -> str:
+        """Clicks a button/link named `label`, but ONLY inside the first
+        element with ARIA role `container_role` (e.g. "dialog") - scopes
+        the click so a same-named button OUTSIDE that container (a cookie
+        banner's "Accept", a stale modal, an old chat message) is never
+        matched, unlike smart_click()'s whole-page search. Same
+        'Clicked...'/'Could not find...' string contract as smart_click()
+        so callers can check success the same way."""
+        page = await self._get_page()
+        try:
+            container = page.get_by_role(container_role)
+            if await container.count() == 0:
+                return f"Could not find a '{container_role}' container."
+            target = container.first.get_by_role("button", name=label)
+            if await target.count() == 0:
+                target = container.first.get_by_text(label, exact=False)
+            if await target.count() == 0:
+                return f"Could not find '{label}' inside the '{container_role}' container."
+            await target.first.click(timeout=5_000)
+            return f"Clicked: '{label}' (inside {container_role})"
+        except Exception as e:
+            return f"Could not click '{label}' inside the '{container_role}' container: {e}"
+
+    async def role_container_text(self, container_role: str) -> str:
+        """Inner text of the first element with ARIA role `container_role`
+        (e.g. "dialog"), or "" if none exists on the page right now. Lets a
+        caller check for call-indicator wording SCOPED to a real dialog
+        container instead of the whole page - see
+        instagram_call_answer.py's check_and_answer() for why that
+        matters (arbitrary page text like an old "calling you later"
+        message must never be mistaken for a ringing call). Never raises."""
+        page = await self._get_page()
+        try:
+            container = page.get_by_role(container_role)
+            if await container.count() == 0:
+                return ""
+            return (await container.first.inner_text())[:4_000]
+        except Exception:
+            return ""
 
     async def new_tab(self, url: str = "") -> str:
         page = await self._get_page()

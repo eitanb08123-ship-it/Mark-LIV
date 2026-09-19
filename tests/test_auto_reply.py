@@ -24,14 +24,24 @@ def _no_real_conversation_history(monkeypatch):
     """Isolates every test in this file from the real conversation_history
     module (and the JSON file it would otherwise touch) by default: no
     history, no "already handled" match. Individual tests override
-    `last_handled_incoming` or `format_for_prompt` to exercise the dedup /
+    `is_duplicate_incoming` or `format_for_prompt` to exercise the dedup /
     context-injection paths specifically."""
-    monkeypatch.setattr(auto_reply.conversation_history, "format_for_prompt", lambda platform, contact: "")
-    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming", lambda platform, contact: "")
+    monkeypatch.setattr(auto_reply.conversation_history, "format_for_prompt", lambda platform, contact, thread_id=None: "")
+    monkeypatch.setattr(auto_reply.conversation_history, "is_duplicate_incoming",
+                        lambda platform, contact, text, thread_id=None, min_gap_seconds=300: False)
     recorded = []
     monkeypatch.setattr(auto_reply.conversation_history, "append_turn",
-                        lambda platform, contact, role, text: recorded.append((platform, contact, role, text)))
+                        lambda platform, contact, role, text, thread_id=None: recorded.append((platform, contact, role, text)))
     return recorded
+
+
+@pytest.fixture(autouse=True)
+def _default_foreground_ok(monkeypatch):
+    """By default, pretend focus can't be checked at all (None) - the
+    "proceed with today's best-effort behavior" case - so existing tests
+    that don't care about item 3's foreground check aren't affected by it.
+    Tests exercising the check itself override this."""
+    monkeypatch.setattr(auto_reply, "_ensure_foreground", lambda app_name: None)
 
 
 def test_disabled_by_default_returns_empty_without_touching_anything(monkeypatch):
@@ -156,14 +166,47 @@ def test_reply_to_chat_skips_sending_when_gemini_produces_nothing(monkeypatch):
 
 def test_reply_to_chat_skips_a_duplicate_of_the_last_handled_message(monkeypatch):
     called = {"opened": False}
-    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming",
-                        lambda platform, contact: "2 unread messages")
+    monkeypatch.setattr(auto_reply.conversation_history, "is_duplicate_incoming",
+                        lambda platform, contact, text, thread_id=None, min_gap_seconds=300: True)
     monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
 
     result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
 
     assert called["opened"] is False
     assert "skipping duplicate" in result.lower()
+
+
+def test_reply_to_chat_aborts_when_focus_cannot_be_confirmed(monkeypatch):
+    """Item 3: launch_app()/_open_app() only guarantees the process exists,
+    not that the correct window has keyboard focus. If _ensure_foreground()
+    confirms it does NOT, the reply must not be sent at all."""
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_ensure_foreground", lambda app_name: False)
+    pasted = {"called": False}
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: pasted.__setitem__("called", True))
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert pasted["called"] is False
+    assert "focus" in result.lower()
+
+
+def test_reply_to_chat_proceeds_when_focus_cannot_be_checked_at_all(monkeypatch):
+    """None means "couldn't verify" (e.g. pywinauto/pywin32 missing) - must
+    degrade to best-effort, not block."""
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_ensure_foreground", lambda app_name: None)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    pasted = {"called": False}
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: pasted.__setitem__("called", True))
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n2 unread messages")
+
+    assert pasted["called"] is True
+    assert "focus" not in result.lower()
 
 
 def test_auto_reply_cycle_replies_to_each_unread_chat(monkeypatch):
@@ -277,23 +320,92 @@ def test_inspect_chat_window_reports_connection_failure(monkeypatch):
     assert "could not connect" in result.lower()
 
 
+def test_inspect_chat_window_includes_a_privacy_note(monkeypatch):
+    """Item 7: the dump can include real chat content, not just structure
+    - callers must be warned, not left to assume it's safe to share."""
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    fake_win = SimpleNamespace(print_control_identifiers=lambda depth=3: print("Dialog"))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name, timeout=5.0: fake_win)
+
+    result = auto_reply.inspect_chat_window("WhatsApp")
+
+    assert "privacy" in result.lower()
+
+
+# ── health_check() (item 7) ──────────────────────────────────────────────────
+
+def test_health_check_desktop_ok_when_rows_are_found(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    fake_win = SimpleNamespace(descendants=lambda control_type=None: [SimpleNamespace(window_text=lambda: "Dana")])
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name, timeout=5.0: fake_win)
+
+    assert auto_reply.health_check("whatsapp") == "ok"
+
+
+def test_health_check_desktop_warns_when_nothing_is_found(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+    fake_win = SimpleNamespace(descendants=lambda control_type=None: [])
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name, timeout=5.0: fake_win)
+
+    result = auto_reply.health_check("whatsapp")
+
+    assert "warning" in result.lower()
+
+
+def test_health_check_desktop_reports_unavailable_without_pywinauto(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", False)
+
+    assert "unavailable" in auto_reply.health_check("whatsapp").lower()
+
+
+def test_health_check_desktop_reports_connection_failure(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_PYWINAUTO", True)
+
+    def _boom(app_name, timeout=5.0):
+        raise RuntimeError("not open")
+    monkeypatch.setattr(auto_reply, "_connect", _boom)
+
+    assert "unavailable" in auto_reply.health_check("whatsapp").lower()
+
+
+def test_health_check_instagram_reports_unavailable_without_browser_control(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", False)
+
+    assert "unavailable" in auto_reply.health_check("instagram").lower()
+
+
 # ── Instagram path (browser-based, reuses browser_control's Playwright session) ──
 # Regression coverage for the actual bug reported: auto_reply defaulted to
 # watching WhatsApp even for a setup built entirely around a dedicated
 # Instagram account, so enabling it silently watched the wrong app.
 
 class _FakeBrowserSession:
-    def __init__(self, url="https://www.instagram.com/direct/inbox/", page_text=""):
+    def __init__(self, url="https://www.instagram.com/direct/inbox/", page_text="",
+                rows=None, click_ok=True, type_ok=True, press_ok=True, delivered=True):
         self.url = url
         self.page_text = page_text
+        self.rows = rows if rows is not None else []
         self.went_to = []
         self.clicked = []
         self.typed = []
         self.pressed = []
+        # Individually toggle each action's success, for item 2's
+        # verify-every-step tests.
+        self.click_ok = click_ok
+        self.type_ok = type_ok
+        self.press_ok = press_ok
+        self.delivered = delivered
 
     def run(self, coro, timeout=15):
         import asyncio
         return asyncio.run(coro)
+
+    def exclusive(self):
+        import contextlib
+        @contextlib.contextmanager
+        def _cm():
+            yield
+        return _cm()
 
     async def get_url(self):
         return self.url
@@ -306,16 +418,27 @@ class _FakeBrowserSession:
         self.url = url
         return f"Opened: {url}"
 
+    async def query_rows(self, selector, text_selector='[dir="auto"]', limit=30):
+        return self.rows
+
     async def smart_click(self, description):
         self.clicked.append(description)
+        if not self.click_ok:
+            return f"Could not find element: '{description}'"
         return f"Clicked: '{description}'"
 
     async def smart_type(self, description, text):
         self.typed.append((description, text))
+        if not self.type_ok:
+            return f"Could not find input: '{description}'"
+        if self.delivered:
+            self.page_text = (self.page_text or "") + "\n" + text
         return f"Typed into ({description}): '{text}'"
 
     async def press(self, key):
         self.pressed.append(key)
+        if not self.press_ok:
+            return f"Key error: boom"
         return f"Pressed: {key}"
 
 
@@ -358,61 +481,174 @@ def test_instagram_platform_reports_when_browser_control_unavailable(monkeypatch
     assert any("browser_control" in r.lower() for r in result)
 
 
-def test_find_unread_instagram_chats_pairs_contact_with_the_unread_marker(monkeypatch):
+def _row(name, preview=None, marker="3 unread messages", href="https://instagram.com/direct/t/1/"):
+    """A query_rows()-shaped row. 3 texts (name, preview, marker) is the
+    'confident' case; omitting `preview` yields the low-confidence 2-node
+    case (today's exact bug: name + marker only, no real message)."""
+    texts = [name] + ([preview] if preview is not None else []) + [marker]
+    return {"href": href, "texts": texts}
+
+
+def test_health_check_instagram_ok_when_rows_are_found(monkeypatch):
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
-    fake = _FakeBrowserSession(page_text="Dana\n3 unread messages\nMom\nSee you tonight")
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="hi")])
     monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
 
-    result = auto_reply._find_unread_instagram_chats()
+    assert auto_reply.health_check("instagram") == "ok"
 
-    # "Mom" has no unread marker and must not be picked up; "Dana" (the line
-    # right before the unread marker) must be preserved as the contact -
-    # this is the exact bug caught while writing this test: matching only
-    # the marker line on its own loses the contact entirely.
-    assert result == ["Dana\n3 unread messages"]
-    assert fake.went_to == []  # already on instagram.com - no navigation needed
+
+def test_health_check_instagram_warns_when_no_rows_found(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[])
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    assert "warning" in auto_reply.health_check("instagram").lower()
+
+
+def test_find_unread_instagram_chats_extracts_the_real_message_not_the_marker(monkeypatch):
+    """Item 1's core fix: the actual message preview (not '3 unread
+    messages') must be what gets extracted."""
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="Are you free tonight?")])
+
+    result = auto_reply._find_unread_instagram_chats(fake)
+
+    assert result == [{
+        "contact": "Dana", "incoming_text": "Are you free tonight?",
+        "thread_id": "https://instagram.com/direct/t/1/",
+    }]
+
+
+def test_find_unread_instagram_chats_ignores_rows_without_an_unread_marker(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[{"href": "t2", "texts": ["Mom", "See you tonight"]}])
+
+    result = auto_reply._find_unread_instagram_chats(fake)
+
+    assert result == []
+
+
+def test_find_unread_instagram_chats_low_confidence_row_has_no_incoming_text(monkeypatch):
+    """The exact bug: only a name + the unread-count marker, no separate
+    preview text - must NOT guess the marker is the real message."""
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview=None)])
+
+    result = auto_reply._find_unread_instagram_chats(fake)
+
+    assert len(result) == 1
+    assert result[0]["contact"] == "Dana"
+    assert result[0]["incoming_text"] is None
 
 
 def test_find_unread_instagram_chats_matches_hebrew_unread_markers(monkeypatch):
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
-    fake = _FakeBrowserSession(page_text="דנה\n3 הודעות שלא נקראו\nאמא\nנתראה הערב")
-    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    fake = _FakeBrowserSession(rows=[_row("דנה", preview="נתראה הערב?", marker="3 הודעות שלא נקראו")])
 
-    result = auto_reply._find_unread_instagram_chats()
+    result = auto_reply._find_unread_instagram_chats(fake)
 
-    assert result == ["דנה\n3 הודעות שלא נקראו"]
+    assert result[0]["contact"] == "דנה"
+    assert result[0]["incoming_text"] == "נתראה הערב?"
 
 
-def test_find_unread_instagram_chats_navigates_when_not_on_instagram(monkeypatch):
+def test_find_unread_instagram_chats_navigates_when_not_on_inbox_route(monkeypatch):
+    """Item 5's route check reused here: a non-inbox URL (profile, feed,
+    thread, login - not just 'not instagram.com at all') must navigate."""
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
-    fake = _FakeBrowserSession(url="https://example.com", page_text="")
-    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    fake = _FakeBrowserSession(url="https://www.instagram.com/some_profile/", rows=[])
 
-    auto_reply._find_unread_instagram_chats()
+    auto_reply._find_unread_instagram_chats(fake)
 
     assert fake.went_to == [auto_reply._INSTAGRAM_INBOX_URL]
 
 
-def test_reply_via_instagram_clicks_types_and_sends(monkeypatch):
-    fake = _FakeBrowserSession()
-    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+def test_find_unread_instagram_chats_no_navigation_when_already_on_inbox(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(url="https://www.instagram.com/direct/inbox/", rows=[])
 
-    result = auto_reply._reply_via_instagram("Dana", "Sure, on it!")
+    auto_reply._find_unread_instagram_chats(fake)
+
+    assert fake.went_to == []
+
+
+# ── _reply_via_instagram (item 2: verify every action + delivery) ──────────
+
+def test_reply_via_instagram_full_success_path(monkeypatch):
+    fake = _FakeBrowserSession()
+
+    result = auto_reply._reply_via_instagram(fake, "Dana", "Sure, on it!")
 
     assert fake.clicked == ["Dana"]
     assert fake.typed == [("Message", "Sure, on it!")]
     assert fake.pressed == ["Enter"]
-    assert "Dana" in result
-    assert "Sure, on it!" in result
+    assert result.startswith("Replied")
+    assert "Dana" in result and "Sure, on it!" in result
+
+
+def test_reply_via_instagram_stops_if_click_fails(monkeypatch):
+    fake = _FakeBrowserSession(click_ok=False)
+
+    result = auto_reply._reply_via_instagram(fake, "Dana", "Sure, on it!")
+
+    assert fake.typed == []
+    assert fake.pressed == []
+    assert not result.startswith("Replied")
+    assert "open the conversation" in result.lower()
+
+
+def test_reply_via_instagram_stops_if_typing_fails(monkeypatch):
+    fake = _FakeBrowserSession(type_ok=False)
+
+    result = auto_reply._reply_via_instagram(fake, "Dana", "Sure, on it!")
+
+    assert fake.pressed == []
+    assert not result.startswith("Replied")
+    assert "message box" in result.lower()
+
+
+def test_reply_via_instagram_stops_if_pressing_enter_fails(monkeypatch):
+    fake = _FakeBrowserSession(press_ok=False)
+
+    result = auto_reply._reply_via_instagram(fake, "Dana", "Sure, on it!")
+
+    assert not result.startswith("Replied")
+    assert "submit" in result.lower()
+
+
+def test_reply_via_instagram_reports_unconfirmed_delivery(monkeypatch):
+    """A click/type/press can each individually 'succeed' while the
+    message still never reaches the conversation - delivery must be
+    verified by re-reading the page, not assumed."""
+    fake = _FakeBrowserSession(delivered=False)
+
+    result = auto_reply._reply_via_instagram(fake, "Dana", "Sure, on it!")
+
+    assert not result.startswith("Replied")
+    assert "could not verify" in result.lower()
+
+
+# ── _reply_to_instagram_row / _auto_reply_cycle_instagram (items 1, 2, 6, 8) ─
+
+def test_reply_to_instagram_row_skips_when_message_could_not_be_isolated(monkeypatch):
+    """Item 1's explicit fallback: never guess - skip and say so."""
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": None, "thread_id": "t1"}
+    gemini_called = {"yes": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda *a: gemini_called.__setitem__("yes", True) or "x")
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert gemini_called["yes"] is False
+    assert fake.clicked == []
+    assert "skipping" in result.lower()
 
 
 def test_auto_reply_cycle_instagram_end_to_end(monkeypatch, _no_real_conversation_history):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
-    monkeypatch.setattr(auto_reply, "_find_unread_instagram_chats", lambda: ["Dana\nunread"])
-    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
-    fake = _FakeBrowserSession()
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="unread")])
     monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
 
     result = auto_reply.auto_reply_cycle("instagram")
 
@@ -426,13 +662,45 @@ def test_auto_reply_cycle_instagram_end_to_end(monkeypatch, _no_real_conversatio
 def test_auto_reply_cycle_instagram_skips_a_duplicate_message(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
     monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
-    monkeypatch.setattr(auto_reply, "_find_unread_instagram_chats", lambda: ["Dana\nunread"])
-    monkeypatch.setattr(auto_reply.conversation_history, "last_handled_incoming",
-                        lambda platform, contact: "unread")
-    fake = _FakeBrowserSession()
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="unread")])
     monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    monkeypatch.setattr(auto_reply.conversation_history, "is_duplicate_incoming",
+                        lambda platform, contact, text, thread_id=None, min_gap_seconds=300: True)
 
     result = auto_reply.auto_reply_cycle("instagram")
 
     assert "skipping duplicate" in result[0].lower()
     assert fake.clicked == []
+
+
+def test_auto_reply_cycle_instagram_does_not_save_history_on_unconfirmed_delivery(monkeypatch, _no_real_conversation_history):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="unread")], delivered=False)
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    assert "could not verify" in result[0].lower()
+    assert _no_real_conversation_history == []
+
+
+def test_auto_reply_cycle_instagram_locks_the_session_for_the_whole_cycle(monkeypatch):
+    """Item 6: the find -> reply sequence must run inside session.exclusive()."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[])
+    entered = {"yes": False}
+    real_exclusive = fake.exclusive
+
+    def _tracking_exclusive():
+        entered["yes"] = True
+        return real_exclusive()
+
+    fake.exclusive = _tracking_exclusive
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+
+    auto_reply.auto_reply_cycle("instagram")
+
+    assert entered["yes"] is True

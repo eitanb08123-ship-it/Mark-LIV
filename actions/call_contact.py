@@ -46,6 +46,7 @@ import time
 
 from actions.send_message import (
     _PYAUTOGUI,
+    _ensure_foreground,
     _open_app,
     _open_browser_url,
     _paste_text,
@@ -90,6 +91,12 @@ def windows_idle_seconds() -> float | None:
 def _call_via_desktop_app(app_name: str, receiver: str) -> str:
     if not _open_app(app_name):
         return f"Could not open {app_name}."
+
+    if _ensure_foreground(app_name) is False:
+        return (
+            f"Could not confirm {app_name} has keyboard focus - not proceeding, to avoid "
+            f"sending keystrokes into whatever window actually had focus."
+        )
 
     time.sleep(1.0)
     _search_in_app(receiver, app_name)

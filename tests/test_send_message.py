@@ -223,6 +223,105 @@ def test_search_in_app_uses_ctrl_f_when_no_app_name_given(monkeypatch):
     assert hotkeys == [("ctrl", "f")]
 
 
+# ── _ensure_foreground (item 3: process exists != window is focused) ───────
+
+class _FakeFocusWindow:
+    def __init__(self, handle=123):
+        self.handle = handle
+        self.focused = False
+
+    def set_focus(self):
+        self.focused = True
+
+
+def test_ensure_foreground_returns_none_without_pywinauto(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", False)
+    monkeypatch.setattr(send_message, "_WIN32GUI", True)
+
+    assert send_message._ensure_foreground("WhatsApp") is None
+
+
+def test_ensure_foreground_returns_none_without_win32gui(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    monkeypatch.setattr(send_message, "_WIN32GUI", False)
+
+    assert send_message._ensure_foreground("WhatsApp") is None
+
+
+def test_ensure_foreground_true_when_window_becomes_foreground(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    monkeypatch.setattr(send_message, "_WIN32GUI", True)
+    win = _FakeFocusWindow(handle=123)
+    fake_app = SimpleNamespace(connect=lambda **kw: SimpleNamespace(top_window=lambda: win))
+    monkeypatch.setattr(send_message, "Application", lambda backend: fake_app)
+    monkeypatch.setattr(send_message, "win32gui", SimpleNamespace(GetForegroundWindow=lambda: 123), raising=False)
+
+    assert send_message._ensure_foreground("WhatsApp") is True
+    assert win.focused is True
+
+
+def test_ensure_foreground_false_when_a_different_window_has_focus(monkeypatch):
+    """The exact safety gap: WhatsApp's process/window exists, set_focus()
+    was called, but a DIFFERENT window (e.g. the browser the user is
+    actively using) is still the real foreground window."""
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    monkeypatch.setattr(send_message, "_WIN32GUI", True)
+    win = _FakeFocusWindow(handle=123)
+    fake_app = SimpleNamespace(connect=lambda **kw: SimpleNamespace(top_window=lambda: win))
+    monkeypatch.setattr(send_message, "Application", lambda backend: fake_app)
+    monkeypatch.setattr(send_message, "win32gui", SimpleNamespace(GetForegroundWindow=lambda: 999), raising=False)
+
+    assert send_message._ensure_foreground("WhatsApp") is False
+
+
+def test_ensure_foreground_returns_none_on_connection_failure(monkeypatch):
+    monkeypatch.setattr(send_message, "_PYWINAUTO", True)
+    monkeypatch.setattr(send_message, "_WIN32GUI", True)
+
+    def _boom(backend):
+        raise RuntimeError("window not found")
+    monkeypatch.setattr(send_message, "Application", _boom)
+    monkeypatch.setattr(send_message, "win32gui", SimpleNamespace(GetForegroundWindow=lambda: 1), raising=False)
+
+    assert send_message._ensure_foreground("WhatsApp") is None
+
+
+def test_desktop_send_aborts_when_focus_is_confirmed_absent(monkeypatch):
+    monkeypatch.setattr(send_message, "_open_app", lambda name: True)
+    monkeypatch.setattr(send_message, "_ensure_foreground", lambda name: False)
+    searched = {"called": False}
+    monkeypatch.setattr(send_message, "_search_in_app", lambda q, app_name="": searched.__setitem__("called", True))
+
+    result = send_message._desktop_send("WhatsApp", "Dana", "hi")
+
+    assert searched["called"] is False
+    assert "focus" in result.lower()
+
+
+def test_desktop_send_proceeds_when_focus_cannot_be_checked(monkeypatch):
+    monkeypatch.setattr(send_message, "_open_app", lambda name: True)
+    monkeypatch.setattr(send_message, "_ensure_foreground", lambda name: None)
+    monkeypatch.setattr(send_message, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(send_message, "_paste_text", lambda text: None)
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None), raising=False)
+
+    result = send_message._desktop_send("WhatsApp", "Dana", "hi")
+
+    assert "sent" in result.lower()
+
+
+def test_desktop_send_proceeds_when_focus_is_confirmed(monkeypatch):
+    monkeypatch.setattr(send_message, "_open_app", lambda name: True)
+    monkeypatch.setattr(send_message, "_ensure_foreground", lambda name: True)
+    monkeypatch.setattr(send_message, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(send_message, "_paste_text", lambda text: None)
+    monkeypatch.setattr(send_message, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None), raising=False)
+
+    result = send_message._desktop_send("WhatsApp", "Dana", "hi")
+
+    assert "sent" in result.lower()
+
+
 def test_open_app_delegates_to_open_app_module(monkeypatch):
     calls = []
     monkeypatch.setattr(send_message, "_launch_app", lambda name: calls.append(name) or True)
