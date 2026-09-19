@@ -167,6 +167,53 @@ def test_is_duplicate_incoming_respects_thread_id():
     assert ch.is_duplicate_incoming("instagram", "Dana", "hi", thread_id="t2") is False
 
 
+# ── replied_too_recently (per-chat rate limit, independent of text) ────────
+# Distinct from is_duplicate_incoming: catches a runaway back-and-forth with
+# another autoresponder that keeps generating DIFFERENT wording each time,
+# which text-equality dedup alone would never flag.
+
+def test_replied_too_recently_false_with_no_history():
+    assert ch.replied_too_recently("whatsapp", "Dana") is False
+
+
+def test_replied_too_recently_false_after_only_an_incoming_turn():
+    ch.append_turn("whatsapp", "Dana", "them", "hi")
+    assert ch.replied_too_recently("whatsapp", "Dana") is False
+
+
+def test_replied_too_recently_true_right_after_jarvis_replied():
+    ch.append_turn("whatsapp", "Dana", "them", "hi")
+    ch.append_turn("whatsapp", "Dana", "jarvis", "hey there!")
+    assert ch.replied_too_recently("whatsapp", "Dana", min_gap_seconds=60) is True
+
+
+def test_replied_too_recently_true_even_when_the_new_incoming_text_differs():
+    """The exact scenario this guards against: two different autoresponders
+    generating different wording every time - not the same repeated text
+    is_duplicate_incoming() would catch."""
+    ch.append_turn("whatsapp", "Dana", "them", "message one")
+    ch.append_turn("whatsapp", "Dana", "jarvis", "reply one")
+
+    assert ch.is_duplicate_incoming("whatsapp", "Dana", "a totally different message two") is False
+    assert ch.replied_too_recently("whatsapp", "Dana", min_gap_seconds=60) is True
+
+
+def test_replied_too_recently_false_once_the_cooldown_has_passed(monkeypatch):
+    ch.append_turn("whatsapp", "Dana", "them", "hi")
+    ch.append_turn("whatsapp", "Dana", "jarvis", "hey there!")
+
+    real_time = time.time
+    monkeypatch.setattr(ch.time, "time", lambda: real_time() + 3600)
+
+    assert ch.replied_too_recently("whatsapp", "Dana", min_gap_seconds=60) is False
+
+
+def test_replied_too_recently_respects_thread_id():
+    ch.append_turn("instagram", "Dana", "jarvis", "hey", thread_id="t1")
+    assert ch.replied_too_recently("instagram", "Dana", thread_id="t1", min_gap_seconds=60) is True
+    assert ch.replied_too_recently("instagram", "Dana", thread_id="t2", min_gap_seconds=60) is False
+
+
 # ── atomicity + concurrency (item 11) ───────────────────────────────────────
 
 def test_append_turn_never_leaves_a_half_written_file(tmp_path):

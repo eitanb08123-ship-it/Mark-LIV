@@ -1996,11 +1996,27 @@ class JarvisLive:
         raised, not an oversight. Same idle-time guard as
         _run_call_checkin and for the same reason: the WhatsApp/Telegram
         path drives the real keyboard/mouse (the Instagram path does not,
-        but the guard is cheap and applies to the whole cycle either way)."""
+        but the guard is cheap and applies to the whole cycle either way).
+
+        auto_reply_cycle() itself is built to never raise (every per-chat
+        failure comes back as a result string, already logged below) - an
+        exception escaping it here means something more fundamental broke
+        (the window closed, a selector crashed outright, etc.), not just
+        one bad chat. This loop never gives up on its own, but it also
+        never hammers a broken state at the same 20s cadence forever
+        silently: consecutive failures back off (capped at 5 minutes) and,
+        past a small threshold, log one clear ALERT line instead of an
+        identical quiet error every cycle - so a real problem surfaces
+        instead of scrolling past in the log unnoticed."""
+        consecutive_failures = 0
+        alerted = False
         while True:
-            await asyncio.sleep(20)
+            delay = 20 if consecutive_failures == 0 else min(20 * (2 ** consecutive_failures), 300)
+            await asyncio.sleep(delay)
 
             if not get_auto_reply_enabled():
+                consecutive_failures = 0
+                alerted = False
                 continue
 
             idle = windows_idle_seconds()
@@ -2011,8 +2027,19 @@ class JarvisLive:
                 results = await asyncio.to_thread(auto_reply_cycle)
                 for r in results:
                     self.ui.write_log(f"[AutoReply] {r}")
+                consecutive_failures = 0
+                alerted = False
             except Exception as e:
+                consecutive_failures += 1
                 self.ui.write_log(f"[AutoReply] Error: {e}")
+                if consecutive_failures >= 3 and not alerted:
+                    alerted = True
+                    self.ui.write_log(
+                        f"[AutoReply] ⚠️ ALERT: {consecutive_failures} auto-reply cycles in a row "
+                        f"have failed - backing off (retrying every {min(20 * (2 ** consecutive_failures), 300)}s) "
+                        f"and will keep trying, but this needs a look (is WhatsApp/Telegram/Instagram "
+                        f"still open and logged in?)."
+                    )
             finally:
                 save_auto_reply_last_run(time.time())
 

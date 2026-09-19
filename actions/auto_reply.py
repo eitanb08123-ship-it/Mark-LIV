@@ -45,7 +45,13 @@ brand-new conversation on every message, and the same still-unread row
 isn't answered twice on consecutive polls (conversation_history.
 is_duplicate_incoming() - text equality plus a time gate; Instagram rows
 additionally key by their stable thread URL instead of contact-name text
-when one is available). Every generated reply also passes through
+when one is available). A second, independent guard
+(conversation_history.replied_too_recently()) caps how often this feature
+will send to the SAME contact at all, regardless of what the incoming text
+says - the safety net for a runaway back-and-forth with another
+autoresponder, which text-equality dedup alone would never catch since
+each side keeps generating different wording. Every generated reply also
+passes through
 _validate_reply() - a minimal safety/validation step (non-empty,
 length-capped) between the AI brain and the sender, and every UI action
 (click/type/press) is checked before the next one runs and before
@@ -300,6 +306,13 @@ def _reply_to_instagram_row(session, row: dict) -> str:
     if conversation_history.is_duplicate_incoming("instagram", contact, incoming_text, thread_id=thread_id):
         return f"Already replied to the latest message from {contact} - skipping duplicate."
 
+    if conversation_history.replied_too_recently("instagram", contact, thread_id=thread_id):
+        return (
+            f"Already replied to {contact} within the last "
+            f"{conversation_history.DEFAULT_REPLY_COOLDOWN_SECONDS:.0f}s - skipping to avoid a "
+            f"runaway back-and-forth (e.g. with another autoresponder on their side)."
+        )
+
     reply_text = _validate_reply(_generate_reply("instagram", contact, incoming_text))
     if not reply_text:
         return f"Gemini produced no reply for {contact} - nothing sent."
@@ -372,6 +385,13 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
 
     if conversation_history.is_duplicate_incoming(platform, contact, incoming_text):
         return f"Already replied to the latest message from {contact} - skipping duplicate."
+
+    if conversation_history.replied_too_recently(platform, contact):
+        return (
+            f"Already replied to {contact} within the last "
+            f"{conversation_history.DEFAULT_REPLY_COOLDOWN_SECONDS:.0f}s - skipping to avoid a "
+            f"runaway back-and-forth (e.g. with another autoresponder on their side)."
+        )
 
     reply_text = _validate_reply(_generate_reply(platform, contact, incoming_text))
     if not reply_text:

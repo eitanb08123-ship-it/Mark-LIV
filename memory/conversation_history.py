@@ -63,6 +63,7 @@ MAX_TURNS_PER_THREAD = 20    # kept on disk per contact
 MAX_TURNS_FOR_PROMPT = 6     # most recent turns actually fed to the AI brain
 
 DEFAULT_DUPLICATE_WINDOW_SECONDS = 300
+DEFAULT_REPLY_COOLDOWN_SECONDS = 15
 
 
 def _key(platform: str, contact: str, thread_id: str | None = None) -> str:
@@ -153,6 +154,36 @@ def _last_handled_incoming_turn(platform: str, contact: str, thread_id: str | No
         if turn.get("role") == "them":
             return turn
     return None
+
+
+def _last_handled_outgoing_turn(platform: str, contact: str, thread_id: str | None = None) -> dict | None:
+    thread = _load().get(_key(platform, contact, thread_id), [])
+    for turn in reversed(thread):
+        if turn.get("role") == "jarvis":
+            return turn
+    return None
+
+
+def replied_too_recently(
+    platform: str,
+    contact: str,
+    thread_id: str | None = None,
+    min_gap_seconds: float = DEFAULT_REPLY_COOLDOWN_SECONDS,
+) -> bool:
+    """True when JARVIS already sent an auto-reply to this contact/thread
+    less than `min_gap_seconds` ago - regardless of what the new incoming
+    text says. This is a different safety net than is_duplicate_incoming():
+    that one only catches the SAME incoming text being answered twice; this
+    one catches a runaway back-and-forth where each side (e.g. this feature
+    talking to someone else's autoresponder) keeps generating DIFFERENT
+    text, which text-equality dedup would never flag. A real human sending
+    two genuine messages within the cooldown just waits a few extra seconds
+    for the second reply - a small cost for not looping forever with
+    another bot."""
+    turn = _last_handled_outgoing_turn(platform, contact, thread_id)
+    if turn is None:
+        return False
+    return (time.time() - turn.get("ts", 0)) < min_gap_seconds
 
 
 def last_handled_incoming(platform: str, contact: str, thread_id: str | None = None) -> str:

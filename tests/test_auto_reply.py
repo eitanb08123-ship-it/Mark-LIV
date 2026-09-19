@@ -29,6 +29,9 @@ def _no_real_conversation_history(monkeypatch):
     monkeypatch.setattr(auto_reply.conversation_history, "format_for_prompt", lambda platform, contact, thread_id=None: "")
     monkeypatch.setattr(auto_reply.conversation_history, "is_duplicate_incoming",
                         lambda platform, contact, text, thread_id=None, min_gap_seconds=300: False)
+    monkeypatch.setattr(auto_reply.conversation_history, "replied_too_recently",
+                        lambda platform, contact, thread_id=None, min_gap_seconds=15: False)
+    monkeypatch.setattr(auto_reply.conversation_history, "DEFAULT_REPLY_COOLDOWN_SECONDS", 15)
     recorded = []
     monkeypatch.setattr(auto_reply.conversation_history, "append_turn",
                         lambda platform, contact, role, text, thread_id=None: recorded.append((platform, contact, role, text)))
@@ -174,6 +177,22 @@ def test_reply_to_chat_skips_a_duplicate_of_the_last_handled_message(monkeypatch
 
     assert called["opened"] is False
     assert "skipping duplicate" in result.lower()
+
+
+def test_reply_to_chat_skips_when_replied_too_recently(monkeypatch):
+    """Per-chat rate limit (independent of text): even a brand-new, non-
+    duplicate incoming message must not be answered again if JARVIS just
+    replied to this contact a moment ago - the guard against a runaway
+    back-and-forth with another autoresponder."""
+    called = {"opened": False}
+    monkeypatch.setattr(auto_reply.conversation_history, "replied_too_recently",
+                        lambda platform, contact, thread_id=None, min_gap_seconds=15: True)
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert called["opened"] is False
+    assert "within the last" in result.lower()
 
 
 def test_reply_to_chat_aborts_when_focus_cannot_be_confirmed(monkeypatch):
@@ -670,6 +689,20 @@ def test_auto_reply_cycle_instagram_skips_a_duplicate_message(monkeypatch):
     result = auto_reply.auto_reply_cycle("instagram")
 
     assert "skipping duplicate" in result[0].lower()
+    assert fake.clicked == []
+
+
+def test_auto_reply_cycle_instagram_skips_when_replied_too_recently(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: True)
+    monkeypatch.setattr(auto_reply, "_BROWSER_CONTROL_AVAILABLE", True)
+    fake = _FakeBrowserSession(rows=[_row("Dana", preview="a brand new different message")])
+    monkeypatch.setattr(auto_reply, "_get_browser_session", lambda name="chrome": fake)
+    monkeypatch.setattr(auto_reply.conversation_history, "replied_too_recently",
+                        lambda platform, contact, thread_id=None, min_gap_seconds=15: True)
+
+    result = auto_reply.auto_reply_cycle("instagram")
+
+    assert "within the last" in result[0].lower()
     assert fake.clicked == []
 
 
