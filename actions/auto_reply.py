@@ -71,7 +71,12 @@ from memory.config_manager import (
     get_auto_reply_contacts,
     get_auto_reply_dry_run,
     get_auto_reply_enabled,
+    get_auto_reply_globally_paused,
+    get_auto_reply_paused_contacts,
     get_auto_reply_platforms,
+    get_owner_contact_name,
+    save_auto_reply_globally_paused,
+    save_auto_reply_paused_contacts,
 )
 
 try:
@@ -358,14 +363,96 @@ def _contact_allowed(contact: str) -> bool:
     return any(contact_lower == c.strip().lower() for c in allow_list)
 
 
+def _contact_paused(contact: str) -> bool:
+    """True when auto-reply must NOT respond to this contact right now -
+    either everything is paused (get_auto_reply_globally_paused(), set by
+    the owner-only /pauseall command) or this specific contact is
+    (get_auto_reply_paused_contacts(), set by that contact's own /pause).
+    Checked in ADDITION to _contact_allowed() - a contact can be on the
+    allow-list and still be paused. Same case-insensitive exact-match
+    style as _contact_allowed(): no fuzzy matching."""
+    if get_auto_reply_globally_paused():
+        return True
+    contact_lower = contact.strip().lower()
+    return any(contact_lower == c.strip().lower() for c in get_auto_reply_paused_contacts())
+
+
+def _set_contact_paused(contact: str, paused: bool) -> None:
+    current = get_auto_reply_paused_contacts()
+    contact_lower = contact.strip().lower()
+    without_contact = [c for c in current if c.strip().lower() != contact_lower]
+    save_auto_reply_paused_contacts(without_contact + [contact] if paused else without_contact)
+
+
+def _is_owner_contact(contact: str) -> bool:
+    """True only when `contact` matches the configured owner_contact_name
+    exactly (case-insensitive) - the same trust anchor
+    actions/call_contact.py already uses for "this contact represents the
+    owner". Used to gate /pauseall and /resumeall: unlike WhatsApp's own
+    "message sent from your own phone" signal (what the Node.js prototype
+    this was ported from relies on), mark-liv's detection only ever sees
+    rows already marked unread in the chat list, so there's no equivalent
+    signal available here - owner_contact_name is the closest existing
+    concept. Returns False (never raises) if no owner contact is
+    configured yet, so /pauseall/resumeall simply do nothing until one is."""
+    owner = get_owner_contact_name()
+    return bool(owner) and contact.strip().lower() == owner.strip().lower()
+
+
+def _handle_control_command(contact: str, incoming_text: str) -> str | None:
+    """Recognizes /pause and /resume (per-contact, from anyone - mirrors
+    the Node.js whatsapp-claude-bot prototype this was ported from) and
+    /pauseall and /resumeall (global, owner-only - see _is_owner_contact())
+    inside an incoming message. Returns the confirmation text to send back
+    when `incoming_text` was one of these commands, or None when it
+    wasn't. Callers must fall through to normal reply handling on None,
+    and must NOT run the allow-list check, dedup, cooldown, reply
+    generation, or history append for a recognized command - it's a
+    control action, not a conversational turn to reply to or remember.
+
+    A non-owner sending /pauseall or /resumeall is deliberately NOT an
+    error - it falls through to None (treated as an ordinary message,
+    same as the Node.js prototype's own behavior, where those two commands
+    are wired to a completely separate "message I sent myself" event and
+    an incoming /pauseall from someone else is just chat text)."""
+    command = (incoming_text or "").strip().lower()
+    if command == "/pause":
+        _set_contact_paused(contact, True)
+        return "Auto-reply paused for this chat. Send /resume to turn it back on."
+    if command == "/resume":
+        _set_contact_paused(contact, False)
+        return "Auto-reply resumed for this chat."
+    if command == "/pauseall":
+        if not _is_owner_contact(contact):
+            return None
+        save_auto_reply_globally_paused(True)
+        return "Auto-reply paused globally on every watched platform. Send /resumeall to turn it back on."
+    if command == "/resumeall":
+        if not _is_owner_contact(contact):
+            return None
+        save_auto_reply_globally_paused(False)
+        return "Auto-reply resumed globally."
+    return None
+
+
 def _reply_to_instagram_row(session, row: dict) -> str:
     contact = row.get("contact", "")
     if not contact:
         return "Could not determine who to reply to from an inbox row."
-    if not _contact_allowed(contact):
-        return f"{contact} is not on the auto-reply allow-list - skipping."
     thread_id = row.get("thread_id")
     incoming_text = row.get("incoming_text")
+
+    if incoming_text is not None:
+        command_reply = _handle_control_command(contact, incoming_text)
+        if command_reply is not None:
+            if get_auto_reply_dry_run():
+                return f"[DRY RUN] Would reply to {contact} via Instagram: {command_reply}"
+            return _reply_via_instagram(session, contact, command_reply)
+
+    if not _contact_allowed(contact):
+        return f"{contact} is not on the auto-reply allow-list - skipping."
+    if _contact_paused(contact):
+        return f"{contact} is paused - skipping."
 
     if incoming_text is None:
         return (
@@ -500,12 +587,61 @@ def _get_window_text(win, max_chars: int = 20000) -> str:
     return "\n".join(texts)[:max_chars]
 
 
+def _send_text_to_desktop_chat(app_name: str, contact: str, text: str) -> str:
+    """Sends `text` into `contact`'s chat in `app_name` (an already-open
+    WhatsApp/Telegram Desktop window): opens the app, confirms it actually
+    has keyboard focus, searches for the contact, and pastes+sends. Only a
+    return starting with "Delivered" means delivery was verified by
+    re-reading the window afterward - callers must not treat anything else
+    as delivered. (Deliberately not prefixed "Sent...", which the
+    could-not-verify message below also starts with - a shared prefix
+    there would make a startswith() check on the caller side unable to
+    tell success from failure.) Shared by _reply_to_chat()'s real replies
+    and _handle_control_command()'s confirmation messages, so both go
+    through the exact same foreground-check/verify logic."""
+    if not _open_app(app_name):
+        return f"Could not open {app_name}."
+    if _ensure_foreground(app_name) is False:
+        return (
+            f"Could not confirm {app_name} has keyboard focus - not sending, to avoid "
+            f"typing this into whatever window actually had focus."
+        )
+    time.sleep(1.0)
+    _search_in_app(contact, app_name)
+    pyautogui.press("enter")
+    time.sleep(0.8)
+    _paste_text(text)
+    pyautogui.press("enter")
+    time.sleep(0.3)
+
+    try:
+        window_text = _get_window_text(_connect(app_name))
+    except Exception:
+        window_text = ""
+    if text[:50] not in window_text:
+        return (
+            f"Sent to {contact} via {app_name} but could not verify it actually "
+            f"appears in the conversation."
+        )
+    return f"Delivered to {contact} via {app_name}: {text[:80]}"
+
+
 def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
     contact, incoming_text = _split_row(chat_row_text)
     if not contact:
         return "Could not determine who to reply to from the chat row's text."
+
+    if incoming_text is not None:
+        command_reply = _handle_control_command(contact, incoming_text)
+        if command_reply is not None:
+            if get_auto_reply_dry_run():
+                return f"[DRY RUN] Would send to {contact} via {app_name}: {command_reply}"
+            return _send_text_to_desktop_chat(app_name, contact, command_reply)
+
     if not _contact_allowed(contact):
         return f"{contact} is not on the auto-reply allow-list - skipping."
+    if _contact_paused(contact):
+        return f"{contact} is paused - skipping."
     if incoming_text is None:
         return (
             f"Could not confidently extract {contact}'s actual message from the "
@@ -533,30 +669,9 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
         conversation_history.append_turn(platform, contact, "jarvis", reply_text)
         return f"[DRY RUN] Would reply to {contact} via {app_name}: {reply_text[:80]}"
 
-    if not _open_app(app_name):
-        return f"Could not open {app_name}."
-    if _ensure_foreground(app_name) is False:
-        return (
-            f"Could not confirm {app_name} has keyboard focus - not sending, to avoid "
-            f"typing this reply into whatever window actually had focus."
-        )
-    time.sleep(1.0)
-    _search_in_app(contact, app_name)
-    pyautogui.press("enter")
-    time.sleep(0.8)
-    _paste_text(reply_text)
-    pyautogui.press("enter")
-    time.sleep(0.3)
-
-    try:
-        window_text = _get_window_text(_connect(app_name))
-    except Exception:
-        window_text = ""
-    if reply_text[:50] not in window_text:
-        return (
-            f"Sent to {contact} via {app_name} but could not verify it actually "
-            f"appears in the conversation - not saving to history."
-        )
+    result = _send_text_to_desktop_chat(app_name, contact, reply_text)
+    if not result.startswith("Delivered"):
+        return f"{result} - not saving to history."
 
     conversation_history.append_turn(platform, contact, "them", incoming_text)
     conversation_history.append_turn(platform, contact, "jarvis", reply_text)

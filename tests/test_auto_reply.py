@@ -55,6 +55,15 @@ def _no_contact_allow_list(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_contacts", lambda: [])
 
 
+@pytest.fixture(autouse=True)
+def _no_pause_state(monkeypatch):
+    """By default, nothing is paused - globally or per-contact - the
+    documented default - so existing tests aren't affected. Tests
+    exercising pause/resume override these."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_globally_paused", lambda: False)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: [])
+
+
 def test_disabled_by_default_returns_empty_without_touching_anything(monkeypatch):
     monkeypatch.setattr(auto_reply, "get_auto_reply_enabled", lambda: False)
     called = {"yes": False}
@@ -420,6 +429,278 @@ def test_reply_to_instagram_row_replies_to_a_contact_on_the_allow_list(monkeypat
     result = auto_reply._reply_to_instagram_row(fake, row)
 
     assert result.startswith("Replied")
+
+
+# ── _contact_paused / pause-resume state ────────────────────────────────────
+
+def test_contact_paused_false_by_default(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_globally_paused", lambda: False)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: [])
+    assert auto_reply._contact_paused("Dana") is False
+
+
+def test_contact_paused_true_when_globally_paused_even_with_no_contact_entry(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_globally_paused", lambda: True)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: [])
+    assert auto_reply._contact_paused("Dana") is True
+
+
+@pytest.mark.parametrize("paused_list,contact,expected", [
+    (["Mom"], "Mom", True),
+    (["Mom"], "mom", True),          # case-insensitive
+    (["mom"], "Mom", True),          # case-insensitive the other way
+    (["Mom"], "Dana", False),        # not paused
+    ([], "Dana", False),
+    (["Mom"], "Mommy", False),       # no fuzzy matching, deliberately
+])
+def test_contact_paused_matching(monkeypatch, paused_list, contact, expected):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_globally_paused", lambda: False)
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: paused_list)
+    assert auto_reply._contact_paused(contact) is expected
+
+
+def test_set_contact_paused_true_adds_to_the_list(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Mom"])
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+
+    auto_reply._set_contact_paused("Dana", True)
+
+    assert saved["v"] == ["Mom", "Dana"]
+
+
+def test_set_contact_paused_is_idempotent(monkeypatch):
+    """Pausing an already-paused contact must not add a duplicate entry."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Dana"])
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+
+    auto_reply._set_contact_paused("Dana", True)
+
+    assert saved["v"] == ["Dana"]
+
+
+def test_set_contact_paused_false_removes_case_insensitively(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Mom", "Dana"])
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+
+    auto_reply._set_contact_paused("dana", False)
+
+    assert saved["v"] == ["Mom"]
+
+
+# ── _is_owner_contact ────────────────────────────────────────────────────────
+
+def test_is_owner_contact_matches_case_insensitively(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "Eitan")
+    assert auto_reply._is_owner_contact("eitan") is True
+    assert auto_reply._is_owner_contact("Dana") is False
+
+
+def test_is_owner_contact_false_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "")
+    assert auto_reply._is_owner_contact("Anyone") is False
+
+
+# ── _handle_control_command / pause & resume slash commands ─────────────────
+
+def test_handle_control_command_pause_sets_state_and_confirms(monkeypatch):
+    calls = []
+    monkeypatch.setattr(auto_reply, "_set_contact_paused", lambda contact, paused: calls.append((contact, paused)))
+
+    result = auto_reply._handle_control_command("Dana", "/pause")
+
+    assert calls == [("Dana", True)]
+    assert result == "Auto-reply paused for this chat. Send /resume to turn it back on."
+
+
+def test_handle_control_command_resume_sets_state_and_confirms(monkeypatch):
+    calls = []
+    monkeypatch.setattr(auto_reply, "_set_contact_paused", lambda contact, paused: calls.append((contact, paused)))
+
+    result = auto_reply._handle_control_command("Dana", "/resume")
+
+    assert calls == [("Dana", False)]
+    assert result == "Auto-reply resumed for this chat."
+
+
+def test_handle_control_command_pause_is_case_insensitive_and_trims_whitespace(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_set_contact_paused", lambda contact, paused: None)
+    assert auto_reply._handle_control_command("Dana", "  /PAUSE  ") is not None
+
+
+def test_handle_control_command_pauseall_from_owner_sets_the_global_flag(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "Eitan")
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_globally_paused", lambda v: saved.setdefault("v", v))
+
+    result = auto_reply._handle_control_command("Eitan", "/pauseall")
+
+    assert saved["v"] is True
+    assert "globally" in result.lower()
+
+
+def test_handle_control_command_resumeall_from_owner_clears_the_global_flag(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "Eitan")
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_globally_paused", lambda v: saved.setdefault("v", v))
+
+    result = auto_reply._handle_control_command("Eitan", "/resumeall")
+
+    assert saved["v"] is False
+    assert "resumed globally" in result.lower()
+
+
+def test_handle_control_command_pauseall_from_a_non_owner_contact_is_ignored(monkeypatch):
+    """A /pauseall from anyone but the configured owner contact must not
+    change global state - it falls through as None (an ordinary message),
+    same as the Node.js prototype's own /pauseall being wired to a
+    completely separate "message I sent myself" event."""
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "Eitan")
+    called = {"saved": False}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_globally_paused", lambda v: called.__setitem__("saved", True))
+
+    result = auto_reply._handle_control_command("Dana", "/pauseall")
+
+    assert result is None
+    assert called["saved"] is False
+
+
+def test_handle_control_command_pauseall_with_no_owner_configured_is_ignored(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "")
+    assert auto_reply._handle_control_command("Dana", "/pauseall") is None
+
+
+def test_handle_control_command_returns_none_for_ordinary_text(monkeypatch):
+    assert auto_reply._handle_control_command("Dana", "hey, are you free?") is None
+
+
+# ── control commands intercepted inside the real reply flow ─────────────────
+
+def test_reply_to_chat_pause_command_sends_confirmation_without_generating_a_reply(monkeypatch, _no_real_conversation_history):
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text",
+                        lambda win: "Auto-reply paused for this chat. Send /resume to turn it back on.")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n/pause")
+
+    assert called["generated"] is False        # never asked Gemini for a reply
+    assert saved["v"] == ["Dana"]
+    assert result.startswith("Delivered")
+    assert _no_real_conversation_history == []  # a control action isn't a conversation turn
+
+
+def test_reply_to_chat_resume_command_bypasses_the_pause_check_itself(monkeypatch):
+    """A contact that is currently paused must still be able to send
+    /resume - the command check runs before _contact_paused()."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Dana"])
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text", lambda win: "Auto-reply resumed for this chat.")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n/resume")
+
+    assert saved["v"] == []
+    assert result.startswith("Delivered")
+
+
+def test_reply_to_chat_skips_a_paused_contact(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Dana"])
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert called["generated"] is False
+    assert "paused" in result.lower()
+
+
+def test_reply_to_chat_skips_everyone_when_globally_paused(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_globally_paused", lambda: True)
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert called["generated"] is False
+    assert "paused" in result.lower()
+
+
+def test_reply_to_chat_dry_run_pause_command_updates_state_without_touching_the_desktop(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_dry_run", lambda: True)
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+    called_open = {"opened": False}
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: called_open.__setitem__("opened", True) or True)
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n/pause")
+
+    assert called_open["opened"] is False
+    assert result.startswith("[DRY RUN]")
+    assert saved["v"] == ["Dana"]  # pause STATE still updates - only the desktop send is suppressed
+
+
+def test_reply_to_instagram_row_pause_command_sends_confirmation_without_generating_a_reply(monkeypatch):
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+    saved = {}
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: saved.setdefault("v", c))
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": "/pause", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert called["generated"] is False
+    assert saved["v"] == ["Dana"]
+    assert result.startswith("Replied")
+
+
+def test_reply_to_instagram_row_skips_a_paused_contact(monkeypatch):
+    monkeypatch.setattr(auto_reply, "get_auto_reply_paused_contacts", lambda: ["Dana"])
+    called = {"generated": False}
+    monkeypatch.setattr(auto_reply, "_generate_reply",
+                        lambda platform, contact, text: called.__setitem__("generated", True) or "hi")
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": "you around?", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert called["generated"] is False
+    assert fake.clicked == []
+    assert "paused" in result.lower()
+
+
+def test_reply_to_instagram_row_pauseall_from_non_owner_falls_through_to_a_normal_reply(monkeypatch):
+    """Mirrors test_handle_control_command_pauseall_from_a_non_owner_contact_is_ignored,
+    through the real reply path: someone who isn't the owner literally
+    typing "/pauseall" gets an ordinary AI reply, not a global pause."""
+    monkeypatch.setattr(auto_reply, "get_owner_contact_name", lambda: "Eitan")
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Not sure what you mean!")
+    fake = _FakeBrowserSession()
+    row = {"contact": "Dana", "incoming_text": "/pauseall", "thread_id": "t1"}
+
+    result = auto_reply._reply_to_instagram_row(fake, row)
+
+    assert result.startswith("Replied")
+    assert fake.typed[-1][1] == "Not sure what you mean!"
 
 
 # ── post-send verification (item 4: confirm it actually landed) ────────────
