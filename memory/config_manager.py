@@ -520,6 +520,38 @@ def save_auto_reply_dry_run(enabled: bool) -> None:
     _save_flag("auto_reply_dry_run", enabled)
 
 
+def get_auto_reply_globally_paused() -> bool:
+    """Whether auto-reply is paused for EVERY contact on every watched
+    platform, regardless of the per-contact pause list below. Set via the
+    owner-only /pauseall chat command (actions/auto_reply.py) or
+    configure_auto_response() - not a separate feature from auto-reply,
+    just a temporary "stand down" switch that's faster to flip from chat
+    than turning auto_reply_enabled off and back on. Off by default."""
+    return bool(load_api_keys().get("auto_reply_globally_paused", False))
+
+
+def save_auto_reply_globally_paused(enabled: bool) -> None:
+    _save_flag("auto_reply_globally_paused", enabled)
+
+
+def get_auto_reply_paused_contacts() -> list[str]:
+    """Contacts auto-reply is temporarily paused for, on top of (not
+    instead of) the allow-list in get_auto_reply_contacts() - a paused
+    contact still on the allow-list simply gets no replies until resumed.
+    Empty by default. Stored exactly as given (not lowercased), same as
+    auto_reply_contacts - actions/auto_reply.py's matching does the
+    case-insensitive comparison at check time."""
+    raw = load_api_keys().get("auto_reply_paused_contacts")
+    if isinstance(raw, list):
+        return [str(c).strip() for c in raw if str(c).strip()]
+    return []
+
+
+def save_auto_reply_paused_contacts(contacts: list[str]) -> None:
+    cleaned = [str(c).strip() for c in (contacts or []) if str(c).strip()]
+    _patch_config(auto_reply_paused_contacts=cleaned)
+
+
 def get_instagram_auto_answer_enabled() -> bool:
     """Whether JARVIS keeps a visible browser window on Instagram's inbox
     and auto-accepts anything that looks like an incoming call. Off by
