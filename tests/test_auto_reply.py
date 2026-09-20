@@ -431,6 +431,100 @@ def test_reply_to_instagram_row_replies_to_a_contact_on_the_allow_list(monkeypat
     assert result.startswith("Replied")
 
 
+# ── _typing_delay_seconds / pre-send typing simulation ──────────────────────
+
+def test_typing_delay_clamps_a_very_short_text_to_the_minimum(monkeypatch):
+    monkeypatch.setattr(auto_reply.random, "uniform", lambda a, b: 0)  # no jitter
+    assert auto_reply._typing_delay_seconds("hi") == auto_reply._TYPING_DELAY_MIN_SECONDS
+
+
+def test_typing_delay_clamps_a_very_long_text_to_the_maximum(monkeypatch):
+    monkeypatch.setattr(auto_reply.random, "uniform", lambda a, b: 0)  # no jitter
+    assert auto_reply._typing_delay_seconds("x" * 1000) == auto_reply._TYPING_DELAY_MAX_SECONDS
+
+
+def test_typing_delay_scales_with_text_length_between_the_clamps(monkeypatch):
+    monkeypatch.setattr(auto_reply.random, "uniform", lambda a, b: 0)  # no jitter
+    # 40ms/char * 60 chars = 2400ms = 2.4s - well inside [1.2, 6.0].
+    assert auto_reply._typing_delay_seconds("x" * 60) == pytest.approx(2.4)
+
+
+def test_typing_delay_applies_the_documented_jitter_range(monkeypatch):
+    # random.uniform must be called with (-300, 300)ms, per the ported formula.
+    captured = {}
+
+    def _fake_uniform(a, b):
+        captured["range"] = (a, b)
+        return 0
+
+    monkeypatch.setattr(auto_reply.random, "uniform", _fake_uniform)
+    auto_reply._typing_delay_seconds("x" * 60)
+    assert captured["range"] == (-auto_reply._TYPING_JITTER_MS, auto_reply._TYPING_JITTER_MS)
+
+
+def test_reply_to_chat_sleeps_for_the_typing_delay_before_sending(monkeypatch, _no_real_conversation_history):
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text", lambda win: "Sure, on it!")
+    slept = []
+    monkeypatch.setattr(auto_reply.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(auto_reply, "_typing_delay_seconds", lambda text: 3.5)
+
+    auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert 3.5 in slept
+
+
+def test_reply_to_chat_dry_run_does_not_sleep_for_a_typing_delay(monkeypatch, _no_real_conversation_history):
+    """Dry-run never touches the desktop at all, so there's nothing to
+    simulate typing before - it must not pay the delay either."""
+    monkeypatch.setattr(auto_reply, "get_auto_reply_dry_run", lambda: True)
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "Sure, on it!")
+    monkeypatch.setattr(auto_reply, "_typing_delay_seconds", lambda text: (_ for _ in ()).throw(
+        AssertionError("typing delay must not be computed in dry-run")))
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\nAre you free tonight?")
+
+    assert result.startswith("[DRY RUN]")
+
+
+def test_reply_to_chat_control_command_does_not_sleep_for_a_typing_delay(monkeypatch):
+    """Command confirmations are sent immediately, matching the Node.js
+    prototype's own msg.reply() for /pause and /resume - only
+    Gemini-generated replies get the typing-delay treatment."""
+    monkeypatch.setattr(auto_reply, "save_auto_reply_paused_contacts", lambda c: None)
+    monkeypatch.setattr(auto_reply, "_open_app", lambda name: True)
+    monkeypatch.setattr(auto_reply, "_search_in_app", lambda q, app_name="": None)
+    monkeypatch.setattr(auto_reply, "_paste_text", lambda text: None)
+    monkeypatch.setattr(auto_reply, "pyautogui", SimpleNamespace(press=lambda *a, **kw: None))
+    monkeypatch.setattr(auto_reply, "_connect", lambda app_name: object())
+    monkeypatch.setattr(auto_reply, "_get_window_text",
+                        lambda win: "Auto-reply paused for this chat. Send /resume to turn it back on.")
+    monkeypatch.setattr(auto_reply, "_typing_delay_seconds", lambda text: (_ for _ in ()).throw(
+        AssertionError("typing delay must not apply to a control-command confirmation")))
+
+    result = auto_reply._reply_to_chat("WhatsApp", "Dana\n/pause")
+
+    assert result.startswith("Delivered")
+
+
+def test_reply_to_instagram_row_sleeps_for_the_typing_delay_before_sending(monkeypatch):
+    monkeypatch.setattr(auto_reply, "_generate_reply", lambda platform, contact, text: "On my way!")
+    fake = _FakeBrowserSession()
+    slept = []
+    monkeypatch.setattr(auto_reply.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(auto_reply, "_typing_delay_seconds", lambda text: 2.2)
+    row = {"contact": "Dana", "incoming_text": "you around?", "thread_id": "t1"}
+
+    auto_reply._reply_to_instagram_row(fake, row)
+
+    assert 2.2 in slept
+
+
 # ── _contact_paused / pause-resume state ────────────────────────────────────
 
 def test_contact_paused_false_by_default(monkeypatch):

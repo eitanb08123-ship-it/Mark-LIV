@@ -480,6 +480,7 @@ def _reply_to_instagram_row(session, row: dict) -> str:
         conversation_history.append_turn("instagram", contact, "jarvis", reply_text, thread_id=thread_id)
         return f"[DRY RUN] Would reply to {contact} via Instagram: {reply_text[:80]}"
 
+    time.sleep(_typing_delay_seconds(reply_text))
     result = _reply_via_instagram(session, contact, reply_text)
     if not result.startswith("Replied"):
         return result
@@ -503,6 +504,31 @@ def _reply_to_instagram_row(session, row: dict) -> str:
 _MAX_REPLIES_PER_CYCLE = 5
 _MIN_DELAY_BETWEEN_REPLIES = 1.5
 _MAX_DELAY_BETWEEN_REPLIES = 4.0
+
+
+# A per-MESSAGE "typing" delay before a single reply is actually sent -
+# distinct from _MIN/MAX_DELAY_BETWEEN_REPLIES above, which only throttles
+# the gap BETWEEN separate sends in a batch. This applies to every real
+# send, batched or not, to make a reply that arrives instantly (impossible
+# for a human) look less obviously automated. Formula and thresholds
+# ported as-is from the Node.js whatsapp-claude-bot prototype's own
+# typingDelayForText() (bot.js): estimate = len(text) * 40ms +/- a random
+# 300ms jitter, clamped to [1200ms, 6000ms] so neither a one-word reply
+# feels instant nor an essay-length one makes the sender wait forever.
+# Never applied to dry-run replies (nothing is actually being sent) or to
+# control-command confirmations (_handle_control_command()'s replies are
+# sent immediately, matching the prototype's own msg.reply() calls for
+# /pause and /resume, which bypass its typing-delay path entirely).
+_TYPING_MS_PER_CHAR = 40
+_TYPING_JITTER_MS = 300
+_TYPING_DELAY_MIN_SECONDS = 1.2
+_TYPING_DELAY_MAX_SECONDS = 6.0
+
+
+def _typing_delay_seconds(text: str) -> float:
+    estimate_ms = len(text) * _TYPING_MS_PER_CHAR + random.uniform(-_TYPING_JITTER_MS, _TYPING_JITTER_MS)
+    estimate_seconds = estimate_ms / 1000
+    return max(_TYPING_DELAY_MIN_SECONDS, min(_TYPING_DELAY_MAX_SECONDS, estimate_seconds))
 
 
 def _auto_reply_cycle_instagram() -> list[str]:
@@ -669,6 +695,7 @@ def _reply_to_chat(app_name: str, chat_row_text: str) -> str:
         conversation_history.append_turn(platform, contact, "jarvis", reply_text)
         return f"[DRY RUN] Would reply to {contact} via {app_name}: {reply_text[:80]}"
 
+    time.sleep(_typing_delay_seconds(reply_text))
     result = _send_text_to_desktop_chat(app_name, contact, reply_text)
     if not result.startswith("Delivered"):
         return f"{result} - not saving to history."
