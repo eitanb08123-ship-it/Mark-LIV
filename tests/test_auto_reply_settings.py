@@ -19,6 +19,8 @@ def _config_state(monkeypatch, **overrides):
         "instagram_auto_answer_enabled": False,
         "auto_reply_dry_run": False,
         "auto_reply_contacts": [],
+        "auto_reply_globally_paused": False,
+        "auto_reply_paused_contacts": [],
     }
     state.update(overrides)
 
@@ -28,6 +30,8 @@ def _config_state(monkeypatch, **overrides):
     monkeypatch.setattr(settings, "get_instagram_auto_answer_enabled", lambda: state["instagram_auto_answer_enabled"])
     monkeypatch.setattr(settings, "get_auto_reply_dry_run", lambda: state["auto_reply_dry_run"])
     monkeypatch.setattr(settings, "get_auto_reply_contacts", lambda: state["auto_reply_contacts"])
+    monkeypatch.setattr(settings, "get_auto_reply_globally_paused", lambda: state["auto_reply_globally_paused"])
+    monkeypatch.setattr(settings, "get_auto_reply_paused_contacts", lambda: state["auto_reply_paused_contacts"])
 
     monkeypatch.setattr(settings, "save_auto_reply_enabled",
                          lambda v: state.__setitem__("auto_reply_enabled", v))
@@ -41,6 +45,10 @@ def _config_state(monkeypatch, **overrides):
                          lambda v: state.__setitem__("auto_reply_dry_run", v))
     monkeypatch.setattr(settings, "save_auto_reply_contacts",
                          lambda v: state.__setitem__("auto_reply_contacts", v))
+    monkeypatch.setattr(settings, "save_auto_reply_globally_paused",
+                         lambda v: state.__setitem__("auto_reply_globally_paused", v))
+    monkeypatch.setattr(settings, "save_auto_reply_paused_contacts",
+                         lambda v: state.__setitem__("auto_reply_paused_contacts", v))
     return state
 
 
@@ -58,6 +66,8 @@ def test_no_parameters_only_reports_status_and_changes_nothing(monkeypatch):
         "instagram_auto_answer_enabled": False,
         "auto_reply_dry_run": False,
         "auto_reply_contacts": [],
+        "auto_reply_globally_paused": False,
+        "auto_reply_paused_contacts": [],
     }
 
 
@@ -353,5 +363,126 @@ def test_setting_contacts_alone_does_not_focus_anything(monkeypatch):
                         lambda app_name: calls.append(app_name) or "ok")
 
     settings.configure_auto_response({"auto_reply_contacts": ["Mom"]})
+
+    assert calls == []
+
+
+# ── global pause (/pauseall, /resumeall equivalent) ─────────────────────────
+
+def test_pauses_auto_reply_globally(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({"auto_reply_globally_paused": True})
+
+    assert state["auto_reply_globally_paused"] is True
+    assert "globally paused" in result.lower()
+
+
+def test_resumes_auto_reply_globally(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_globally_paused=True)
+
+    result = settings.configure_auto_response({"auto_reply_globally_paused": False})
+
+    assert state["auto_reply_globally_paused"] is False
+    assert "globally resumed" in result.lower()
+
+
+def test_status_reports_global_pause_state(monkeypatch):
+    _config_state(monkeypatch, auto_reply_globally_paused=True)
+
+    result = settings.configure_auto_response({})
+
+    assert "paused globally: yes" in result.lower()
+
+
+def test_invalid_globally_paused_type_is_rejected_without_writing(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_globally_paused=False)
+
+    result = settings.configure_auto_response({"auto_reply_globally_paused": "true"})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_globally_paused"] is False
+
+
+def test_pausing_globally_alone_does_not_focus_anything(monkeypatch):
+    state = _config_state(monkeypatch)
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_globally_paused": True})
+
+    assert calls == []
+
+
+# ── per-contact pause (/pause, /resume equivalent) ──────────────────────────
+
+def test_sets_the_paused_contacts_list(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({"auto_reply_paused_contacts": ["Mom"]})
+
+    assert state["auto_reply_paused_contacts"] == ["Mom"]
+    assert "paused for mom" in result.lower()
+
+
+def test_clearing_the_paused_contacts_list_is_reported_distinctly(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_paused_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_paused_contacts": []})
+
+    assert state["auto_reply_paused_contacts"] == []
+    assert "cleared" in result.lower()
+
+
+def test_paused_contacts_list_strips_blank_entries(monkeypatch):
+    state = _config_state(monkeypatch)
+
+    settings.configure_auto_response({"auto_reply_paused_contacts": ["Mom", "  ", ""]})
+
+    assert state["auto_reply_paused_contacts"] == ["Mom"]
+
+
+def test_status_reports_the_paused_contacts_list(monkeypatch):
+    _config_state(monkeypatch, auto_reply_paused_contacts=["Mom"])
+
+    result = settings.configure_auto_response({})
+
+    assert "paused contacts: mom" in result.lower()
+
+
+def test_status_reports_none_when_no_contact_is_paused(monkeypatch):
+    _config_state(monkeypatch)
+
+    result = settings.configure_auto_response({})
+
+    assert "paused contacts: none" in result.lower()
+
+
+def test_invalid_paused_contacts_type_is_rejected_without_writing(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_paused_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_paused_contacts": "Mom"})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_paused_contacts"] == ["Mom"]
+
+
+def test_paused_contacts_list_with_a_non_string_entry_is_rejected(monkeypatch):
+    state = _config_state(monkeypatch, auto_reply_paused_contacts=["Mom"])
+
+    result = settings.configure_auto_response({"auto_reply_paused_contacts": ["Dana", 123]})
+
+    assert "invalid" in result.lower()
+    assert state["auto_reply_paused_contacts"] == ["Mom"]
+
+
+def test_setting_paused_contacts_alone_does_not_focus_anything(monkeypatch):
+    state = _config_state(monkeypatch)
+    calls = []
+    monkeypatch.setattr(settings, "_focus_and_maximize",
+                        lambda app_name: calls.append(app_name) or "ok")
+
+    settings.configure_auto_response({"auto_reply_paused_contacts": ["Mom"]})
 
     assert calls == []

@@ -25,12 +25,16 @@ from memory.config_manager import (
     get_auto_reply_contacts,
     get_auto_reply_dry_run,
     get_auto_reply_enabled,
+    get_auto_reply_globally_paused,
+    get_auto_reply_paused_contacts,
     get_auto_reply_platforms,
     get_instagram_auto_answer_enabled,
     get_whatsapp_call_answer_enabled,
     save_auto_reply_contacts,
     save_auto_reply_dry_run,
     save_auto_reply_enabled,
+    save_auto_reply_globally_paused,
+    save_auto_reply_paused_contacts,
     save_auto_reply_platforms,
     save_instagram_auto_answer_enabled,
     save_whatsapp_call_answer_enabled,
@@ -40,6 +44,7 @@ _VALID_PLATFORMS = ("whatsapp", "telegram", "instagram")
 _BOOL_FIELDS = (
     "auto_reply_enabled", "whatsapp_call_answer_enabled",
     "instagram_call_answer_enabled", "auto_reply_dry_run",
+    "auto_reply_globally_paused",
 )
 
 # Instagram is browser-based (no desktop window to bring to the foreground
@@ -71,6 +76,10 @@ def _validate_params(params: dict) -> str:
         raw = params["auto_reply_contacts"]
         if not isinstance(raw, list) or not all(isinstance(c, str) for c in raw):
             return f"Invalid value for auto_reply_contacts: expected a list of contact names, got {raw!r}."
+    if "auto_reply_paused_contacts" in params:
+        raw = params["auto_reply_paused_contacts"]
+        if not isinstance(raw, list) or not all(isinstance(c, str) for c in raw):
+            return f"Invalid value for auto_reply_paused_contacts: expected a list of contact names, got {raw!r}."
     return ""
 
 
@@ -82,11 +91,15 @@ def _current_status() -> str:
     wa_calls = "on" if get_whatsapp_call_answer_enabled() else "off"
     ig_calls = "on" if get_instagram_auto_answer_enabled() else "off"
     dry_run = "on (nothing is actually sent - would-be replies are only logged)" if get_auto_reply_dry_run() else "off"
+    globally_paused = "yes" if get_auto_reply_globally_paused() else "no"
+    paused_contacts = get_auto_reply_paused_contacts()
+    paused_state = ", ".join(paused_contacts) if paused_contacts else "none"
     return (
         f"Auto-reply to messages: {reply_state} (platforms: {reply_platforms}; contacts: {contacts_state}). "
         f"Auto-answer WhatsApp calls: {wa_calls}. "
         f"Auto-answer Instagram calls: {ig_calls}. "
-        f"Dry-run mode: {dry_run}."
+        f"Dry-run mode: {dry_run}. "
+        f"Paused globally: {globally_paused}. Paused contacts: {paused_state}."
     )
 
 
@@ -139,6 +152,19 @@ def configure_auto_response(parameters: dict, player=None, **_) -> str:
             changed.append(f"auto-reply contact allow-list set to {', '.join(cleaned)}")
         else:
             changed.append("auto-reply contact allow-list cleared (now replies to all contacts)")
+
+    if "auto_reply_globally_paused" in params:
+        enabled = params["auto_reply_globally_paused"]
+        save_auto_reply_globally_paused(enabled)
+        changed.append(f"auto-reply globally {'paused' if enabled else 'resumed'}")
+
+    if "auto_reply_paused_contacts" in params:
+        cleaned = [str(c).strip() for c in params["auto_reply_paused_contacts"] if str(c).strip()]
+        save_auto_reply_paused_contacts(cleaned)
+        if cleaned:
+            changed.append(f"auto-reply paused for {', '.join(cleaned)}")
+        else:
+            changed.append("auto-reply per-contact pause list cleared")
 
     # Bring each currently-configured desktop-app platform's window to the
     # foreground and maximize it ONCE, right when this call activates
@@ -231,6 +257,30 @@ TOOL = {
                     "to scope auto-reply to one or a few specific people, e.g. "
                     "'only auto-reply to Mom'. Only takes effect while auto_reply_enabled "
                     "is (or already was) true."
+                ),
+            },
+            "auto_reply_globally_paused": {
+                "type": "BOOLEAN",
+                "description": (
+                    "Temporarily pause (true) or resume (false) auto-reply on EVERY "
+                    "watched platform and contact at once, without changing "
+                    "auto_reply_enabled or any other setting - a quick 'stand down for "
+                    "now' that's faster to undo than turning auto-reply off and back on. "
+                    "This is the same global pause that the owner's own /pauseall and "
+                    "/resumeall chat commands set."
+                ),
+            },
+            "auto_reply_paused_contacts": {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": (
+                    "Temporarily pause auto-reply for ONLY these contacts (exact name "
+                    "match, case-insensitive) - e.g. ['Mom'] means Mom gets no "
+                    "auto-replies until resumed, even if she's on the allow-list. This "
+                    "is the same per-contact pause a contact's own /pause and /resume "
+                    "chat commands set - pass the FULL desired list each time (this "
+                    "replaces the current pause list, it does not add to it). Pass an "
+                    "empty list to resume everyone."
                 ),
             },
         },
